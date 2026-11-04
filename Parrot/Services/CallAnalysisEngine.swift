@@ -400,7 +400,7 @@ final class CallAnalysisEngine {
             if let question = Self.latestQuestion(in: recent.map { ($0.text, $0.source) }) {
                 references = await kb.search(query: question, profileID: profile?.id, topK: 2)
             }
-            let windowQuery = recent.map(\.text).joined(separator: " ")
+            let windowQuery = Self.knowledgeQuery(brief: callBrief, recent: recent.map(\.text))
             for reference in await kb.search(query: windowQuery, profileID: profile?.id)
             where !references.contains(where: { $0.text == reference.text }) {
                 references.append(reference)
@@ -557,6 +557,10 @@ final class CallAnalysisEngine {
             rerunRequested = false
             triggerAnalysis()
         }
+    }
+
+    nonisolated static func knowledgeQuery(brief: String, recent: [String]) -> String {
+        ([brief] + recent).joined(separator: " ")
     }
 
     // MARK: - Snapshot Harness Support

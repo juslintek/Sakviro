@@ -12,6 +12,9 @@ APP         := $(DIST)/Parrot.app
 PLIST       := $(APP)/Contents/Info.plist
 BINDIR      := .build/$(CONFIG)
 VERSION     ?= 0.0.0-dev
+BUNDLE_ID   ?= com.uygar.parrot
+DISPLAY_NAME ?= Parrot
+NO_UPDATER := $(if $(filter com.uygar.parrot,$(BUNDLE_ID)),0,1)
 BUILD_NUM   := $(shell date +%Y%m%d%H%M)
 
 # macOS keys Screen Recording and microphone grants to the app's *designated
@@ -95,7 +98,7 @@ howto:
 
 .PHONY: build
 build:
-	swift build -c $(CONFIG)
+	PARROT_NO_UPDATER=$(NO_UPDATER) swift build -c $(CONFIG)
 
 # Mirrors scripts/release.sh's assembly. Info.plist is xcodegen-managed and
 # still holds $$(VAR) placeholders that Xcode would substitute — do it here.
@@ -111,23 +114,37 @@ bundle: build
 	@printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@cp Parrot/Info.plist $(PLIST)
 	@plutil -replace CFBundleExecutable         -string Parrot           $(PLIST)
-	@plutil -replace CFBundleIdentifier         -string com.uygar.parrot $(PLIST)
-	@plutil -replace CFBundleName               -string Parrot           $(PLIST)
+	@plutil -replace CFBundleIdentifier         -string $(BUNDLE_ID) $(PLIST)
+	@plutil -replace CFBundleName               -string "$(DISPLAY_NAME)" $(PLIST)
 	@plutil -replace CFBundleDevelopmentRegion  -string en               $(PLIST)
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)"     $(PLIST)
 	@plutil -replace CFBundleVersion            -string "$(BUILD_NUM)"   $(PLIST)
 	@plutil -replace LSMinimumSystemVersion     -string "14.0"           $(PLIST)
+	@if [ "$(BUNDLE_ID)" != "com.uygar.parrot" ]; then \
+		plutil -replace SUAutomaticallyUpdate -bool NO $(PLIST); \
+		plutil -replace SUEnableAutomaticChecks -bool NO $(PLIST); \
+		plutil -remove SUFeedURL $(PLIST); \
+		plutil -remove CFBundleURLTypes $(PLIST); \
+	fi
+	@mkdir -p $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/MacOS $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/Resources
+	cp $(BINDIR)/ParrotHostHelper $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/MacOS/
+	cp HostHelper/Info.plist $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/Info.plist
+	plutil -replace CFBundleIdentifier -string "$(BUNDLE_ID).host-helper" $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/Info.plist
+	cp HostHelper/Resources/mlx_worker.py $(APP)/Contents/XPCServices/ParrotHostHelper.xpc/Contents/Resources/
+	codesign --force --options runtime --timestamp=none --sign "$(SIGN_IDENTITY)" $(APP)/Contents/XPCServices/ParrotHostHelper.xpc
 	@# SwiftPM resource bundles + the UI fonts (Info.plist sets ATSApplicationFontsPath ".")
 	cp -R $(BINDIR)/*.bundle $(APP)/Contents/Resources/
 	cp Parrot/Fonts/*.otf $(APP)/Contents/Resources/
 	@# Sparkle is a binary XCFramework: swift build links against it but never
 	@# embeds it, so it has to be copied in by hand. The executable's rpath
 	@# points at ../Frameworks (see Package.swift linkerSettings).
+ifeq ($(NO_UPDATER),0)
 	@mkdir -p $(APP)/Contents/Frameworks
 	cp -R $(BINDIR)/Sparkle.framework $(APP)/Contents/Frameworks/
 	@# Only needed without the network.client entitlement — release.sh drops it
 	@# too, and keeping the dev bundle identical keeps verify --deep honest.
 	@rm -rf $(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc
+endif
 	@# swift build can't compile asset catalogs, so the icon goes through actool.
 	xcrun actool Parrot/Assets.xcassets \
 		--compile $(APP)/Contents/Resources \
@@ -146,12 +163,14 @@ bundle: build
 	@# Re-sign it inside-out with our identity first — mirrors release.sh, and
 	@# never --deep, which would stamp the app's entitlements onto helpers that
 	@# must not have them.
+ifeq ($(NO_UPDATER),0)
 	@for nested in \
 		"$(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
 		"$(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
 		"$(APP)/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
 		"$(APP)/Contents/Frameworks/Sparkle.framework"; do \
 		codesign --force --options runtime --timestamp=none --sign "$(SIGN_IDENTITY)" "$$nested" || exit 1; done
+endif
 	codesign --force --options runtime --timestamp=none \
 		--entitlements Parrot/Parrot.entitlements \
 		--sign "$(SIGN_IDENTITY)" $(APP)
@@ -251,3 +270,9 @@ xcode:
 .PHONY: clean
 clean:
 	rm -rf .build $(DIST)
+
+.PHONY: test-host-cli
+test-host-cli:
+	@mkdir -p .build
+	swiftc HostHelper/HostCLIService.swift HostHelper/HostMLXService.swift tests/HostCLIServiceCheck.swift -o .build/host-cli-check
+	.build/host-cli-check

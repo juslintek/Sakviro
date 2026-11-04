@@ -24,6 +24,11 @@ final class Meeting {
     var duration: TimeInterval
     var systemAudioPath: String
     var micAudioPath: String?
+    var videoPath: String? = nil
+    var rawVideoPath: String? = nil
+    var videoOffset: TimeInterval = 0
+    var videoError: String? = nil
+    var videoWarning: String? = nil
     var status: MeetingStatus
     var errorMessage: String?
     /// AI-generated post-call report; set shortly after recording stops.

@@ -34,7 +34,7 @@ extension RecordingManager {
         let meetings = (try? modelContext.fetch(FetchDescriptor<Meeting>())) ?? []
         let items = meetings.map {
             Retention.Item(id: $0.id, date: $0.importedAt ?? $0.date,
-                           hasAudio: $0.systemAudioPath.nilIfEmpty != nil || $0.micAudioPath?.nilIfEmpty != nil,
+                           hasAudio: $0.systemAudioPath.nilIfEmpty != nil || $0.micAudioPath?.nilIfEmpty != nil || $0.videoPath != nil || $0.rawVideoPath != nil,
                            finished: $0.status == .done || $0.status == .failed)
         }
         let due = Retention.due(items, now: now, audioDays: audioDays, meetingDays: meetingDays)
@@ -47,6 +47,13 @@ extension RecordingManager {
             for path in [m.systemAudioPath.nilIfEmpty, m.micAudioPath?.nilIfEmpty].compactMap({ $0 }) {
                 try? FileManager.default.removeItem(atPath: path)
             }
+            for path in [m.videoPath, m.rawVideoPath] {
+                if let url = VideoCaptureService.ownedURL(path) { try? FileManager.default.removeItem(at: url) }
+            }
+            m.videoPath = nil
+            m.rawVideoPath = nil
+            m.videoError = nil
+            m.videoWarning = nil
             m.systemAudioPath = ""
             m.micAudioPath = nil
         }

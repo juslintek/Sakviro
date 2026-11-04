@@ -30,8 +30,9 @@ final class OnboardingModel {
         let mode = OnboardingMode(rawValue: defaults.string(forKey: OnboardingMode.defaultsKey) ?? "") ?? .full
         var saved = CopilotPath(rawValue: defaults.string(forKey: CopilotPath.defaultsKey) ?? "")
         if mode == .copilot, saved == .later { saved = nil }  // the short tour asks again
+        if saved == .cli, !(CopilotProviderKind(rawValue: defaults.string(forKey: "copilotProvider") ?? "")?.isCLI ?? false) { saved = nil }
         // On-device only greys out Balanced and Cloud, so a saved one can't stand.
-        if defaults.bool(forKey: CloudGate.globalKey), saved == .balanced || saved == .cloud { saved = nil }
+        if defaults.bool(forKey: CloudGate.globalKey), saved == .balanced || saved == .cloud || saved == .cli { saved = nil }
         self.mode = mode
         path = saved
         ollamaModel = defaults.string(forKey: "copilotOllamaModel")
@@ -52,7 +53,7 @@ final class OnboardingModel {
             pathError = "Pick one to continue"
             return
         }
-        if offset > 0, step == .copilotSetup { applyChoices() }
+        if offset > 0, step == .copilotSetup || (step == .copilotPath && path == .cli) { applyChoices() }
         go(to: OnboardingFlow.step(offset, from: step, in: steps))
     }
 

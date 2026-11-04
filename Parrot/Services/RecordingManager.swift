@@ -4,12 +4,14 @@ import CoreGraphics
 import AVFoundation
 import UserNotifications
 import IOKit.ps
+import ScreenCaptureKit
 
 /// Orchestrates audio capture, transcription, and storage for a recording session.
 @MainActor
 @Observable
 final class RecordingManager {
     let audioCaptureManager = AudioCaptureManager()
+    private var videoCapture: VideoCaptureService?
     let transcriptionEngine = TranscriptionEngine()
     let diarizationEngine = DiarizationEngine()
     /// Live-labels sweep (experimental, "liveSpeakerLabels" default): the
@@ -369,6 +371,14 @@ final class RecordingManager {
         isStarting = true
         defer { isStarting = false }
 
+        var videoFilter: SCContentFilter?
+        if UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
+            let capture = VideoCaptureService()
+            guard let filter = try await capture.chooseSource() else { return }
+            videoFilter = filter
+            videoCapture = capture
+        }
+
         // Create meeting
         let meeting = Meeting()
         modelContext.insert(meeting)
@@ -415,12 +425,24 @@ final class RecordingManager {
         do {
             try await audioCaptureManager.startCapture()
         } catch {
+            videoCapture = nil
             modelContext.delete(meeting)
             try? modelContext.save()
             throw error
         }
         meeting.systemAudioPath = audioCaptureManager.systemAudioURL?.path ?? ""
         meeting.micAudioPath = audioCaptureManager.micAudioURL?.path
+        if let videoFilter, let capture = videoCapture {
+            capture.onError = { [weak meeting] message in
+                Task { @MainActor in meeting?.videoWarning = message }
+            }
+            do {
+                try await capture.start(filter: videoFilter, audioOrigin: audioCaptureManager.captureOrigin)
+            } catch {
+                meeting.videoError = error.localizedDescription
+                videoCapture = nil
+            }
+        }
 
         // Wire audio to transcription, tagged by stream (mic = Me, system = Them)
         audioCaptureManager.onAudioBuffer = { [weak self] buffer, source in
@@ -552,6 +574,22 @@ final class RecordingManager {
         // diarization task can read them.
         callAnalysisEngine.stop()
         await audioCaptureManager.stopCapture()
+        if let capture = videoCapture, let meeting = currentMeeting {
+            do {
+                let (url, offset) = try await capture.stop()
+                meeting.rawVideoPath = url.path
+                meeting.videoOffset = offset
+                await retryVideoMux(meeting)
+            } catch VideoCaptureService.VideoError.partial(let url, let offset, let reason) {
+                meeting.rawVideoPath = url.path
+                meeting.videoOffset = offset
+                meeting.videoWarning = reason
+                meeting.videoError = "Video stopped early. Retry to add audio to the saved portion."
+            } catch {
+                meeting.videoError = error.localizedDescription
+            }
+            videoCapture = nil
+        }
 
         // Drain the transcription backlog so the call's final words land before
         // the transcript is assembled for the summary/coaching reports.
@@ -739,6 +777,40 @@ final class RecordingManager {
         await meetingFinished(meeting)
     }
 
+    func retryVideoMux(_ meeting: Meeting) async {
+        guard let raw = VideoCaptureService.ownedURL(meeting.rawVideoPath), let modelContext else { return }
+        let destination = AudioCaptureManager.storageDirectory().appendingPathComponent("video_\(UUID().uuidString).mp4")
+        let audio = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty]
+            .compactMap { $0 }.map { URL(fileURLWithPath: $0) }
+        let previousVideoPath = meeting.videoPath
+        do {
+            try modelContext.save()
+            try await VideoCaptureService.mux(video: raw, offset: meeting.videoOffset, audio: audio, destination: destination)
+            meeting.videoPath = destination.path
+            meeting.videoError = nil
+            do {
+                try modelContext.save()
+            } catch {
+                meeting.videoPath = previousVideoPath
+                throw error
+            }
+            meeting.rawVideoPath = nil
+            do {
+                try modelContext.save()
+                try FileManager.default.removeItem(at: raw)
+            } catch {
+                meeting.rawVideoPath = raw.path
+                meeting.videoWarning = "Video saved, but the original could not be removed: \(error.localizedDescription)"
+                try modelContext.save()
+            }
+            if let previous = VideoCaptureService.ownedURL(previousVideoPath), previous != raw {
+                try FileManager.default.removeItem(at: previous)
+            }
+        } catch {
+            meeting.videoError = error.localizedDescription
+        }
+    }
+
     // MARK: - Deletion
 
     /// Deletes a meeting and its audio files. The only removal path in the app —
@@ -750,6 +822,9 @@ final class RecordingManager {
         NotificationCenter.default.post(name: .parrotMeetingWillDelete, object: meeting.id)
         for path in [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty].compactMap({ $0 }) {
             try? FileManager.default.removeItem(atPath: path)
+        }
+        for path in [meeting.videoPath, meeting.rawVideoPath] {
+            if let url = VideoCaptureService.ownedURL(path) { try? FileManager.default.removeItem(at: url) }
         }
         if currentMeeting?.id == meeting.id { currentMeeting = nil }
         memory.remove(meetingID: meeting.id)

@@ -75,6 +75,7 @@ struct SettingsView: View {
     private var parakeetFitsLanguage: Bool {
         transcriptionLanguage == "auto" || LanguageRouter.parakeetLanguages.contains(transcriptionLanguage)
     }
+    @AppStorage(VideoCaptureService.enabledKey) private var recordVideo = false
     @AppStorage("echoCancellationEnabled") private var echoCancellation = true
     @AppStorage(TranscriptionBackend.defaultsKey) private var transcriptionBackend = TranscriptionBackend.local.rawValue
     @AppStorage("polishAfterCall") private var polishAfterCall = false
@@ -82,6 +83,7 @@ struct SettingsView: View {
     @AppStorage("livePreview") private var livePreview = true
     @State private var section: SettingsSection = .general
     @State private var diarizerDownloading = false
+    @State private var mlxPathsVersion = 0
     @AppStorage("rememberVoices") private var rememberVoices = false
     @AppStorage(RecordingManager.globalMarkHotKeyDefaultsKey) private var globalMarkHotKey = true
     @AppStorage("liveSpeakerLabels") private var liveSpeakerLabels = false
@@ -94,7 +96,9 @@ struct SettingsView: View {
     @State private var savedToastTask: Task<Void, Never>?
     /// Mirrors Sparkle's own setting so the toggle survives a relaunch without
     /// us storing a second copy of the truth.
+    #if !PARROT_NO_UPDATER
     @State private var automaticUpdates = AppUpdater.shared.automaticallyUpdates
+    #endif
 
     /// Opens the bundled Help Book at a specific page anchor (hiutil indexes
     /// anchors — the -a in assemble-help.sh). Dev binaries carry no book, so
@@ -263,17 +267,25 @@ struct SettingsView: View {
                         .font(Theme.Typography.secondary)
                         .foregroundStyle(Theme.Colors.ink2)
                 }
-                SettingsToggleRow(
-                    title: "Keep Parrot up to date",
-                    detail: "Downloads new versions in the background and installs them when you quit. Never during a recording.",
-                    isOn: $automaticUpdates
-                )
-                .onChange(of: automaticUpdates) {
-                    AppUpdater.shared.automaticallyUpdates = automaticUpdates
+                #if !PARROT_NO_UPDATER
+                if AppUpdater.shared.isAvailable {
+                    SettingsToggleRow(
+                        title: "Keep Parrot up to date",
+                        detail: "Downloads new versions in the background and installs them when you quit. Never during a recording.",
+                        isOn: $automaticUpdates
+                    )
+                    .onChange(of: automaticUpdates) {
+                        AppUpdater.shared.automaticallyUpdates = automaticUpdates
+                    }
+                    SettingsLabeledRow(title: "Check for updates", detail: "Or look right now.") {
+                        Button("Check Now") { AppUpdater.shared.checkForUpdates() }
+                    }
+                } else {
+                    SettingsRow { Hint("Updates are disabled for this build.") }
                 }
-                SettingsLabeledRow(title: "Check for updates", detail: "Or look right now.") {
-                    Button("Check Now") { AppUpdater.shared.checkForUpdates() }
-                }
+                #else
+                SettingsRow { Hint("Updates are disabled for this build.") }
+                #endif
                 SettingsLabeledRow(title: "User guide", detail: "Every screen explained, with setup and troubleshooting.") {
                     Button("Open User Guide") { NSApp.showHelp(nil) }
                 }
@@ -306,8 +318,17 @@ struct SettingsView: View {
 
             SettingsCard(title: "Input") {
                 SettingsRow(first: true) {
-                    Hint("System audio comes straight from macOS (audio only, never the screen); the microphone uses your default input device.")
+                    Hint("System audio comes from macOS; the microphone uses your default input device. Video is captured only when enabled and you choose a window or display.")
                 }
+            }
+
+            SettingsCard(title: "Video") {
+                SettingsToggleRow(
+                    title: "Record video",
+                    detail: "Choose a window or display each time a recording starts. Video is saved on this Mac with the microphone and system audio.",
+                    first: true,
+                    isOn: $recordVideo
+                )
             }
 
             CallDetectionCard()
@@ -385,6 +406,9 @@ struct SettingsView: View {
                         Text("Small — 460 MB, better accuracy").tag("small")
                         Text("Large V3 Turbo Compressed — 626 MB, fast, low memory").tag("large-v3-v20240930_626MB")
                         Text("Large V3 Turbo — 1.6 GB, best accuracy").tag("large-v3-turbo")
+                        ForEach(MLXTranscriber.models, id: \.id) { model in
+                            Text(model.name).tag(model.id)
+                        }
                     }
                     .pickerStyle(.radioGroup)
                     .labelsHidden()
@@ -393,6 +417,20 @@ struct SettingsView: View {
                         Hint(parakeetFitsLanguage
                              ? "Calls in other languages, like Turkish, switch to Whisper Large V3 Turbo Compressed on their own."
                              : "Parakeet can't do \(TranscriptionLanguage.name(transcriptionLanguage)), so calls use Whisper.")
+                    }
+                    if MLXTranscriber.isMLX(selectedModel) {
+                        Hint("Choose a Python environment with mlx-whisper installed and a local model folder. Model quality and speed depend on the model and Mac.")
+                        HStack {
+                            Text(UserDefaults.standard.string(forKey: MLXTranscriber.pythonKey) ?? "No Python executable selected")
+                                .lineLimit(1).truncationMode(.middle)
+                            Button("Choose Python…") { chooseMLXPath(key: MLXTranscriber.pythonKey, directory: false) }
+                        }
+                        HStack {
+                            Text(UserDefaults.standard.string(forKey: MLXTranscriber.modelKey(selectedModel)) ?? "No model folder selected")
+                                .lineLimit(1).truncationMode(.middle)
+                            Button("Choose Model…") { chooseMLXPath(key: MLXTranscriber.modelKey(selectedModel), directory: true) }
+                        }
+                        .id(mlxPathsVersion)
                     }
                 }
                 SettingsRow {
@@ -492,6 +530,22 @@ struct SettingsView: View {
                         .overlay(RoundedRectangle(cornerRadius: Theme.Metrics.radius).strokeBorder(Theme.Colors.line))
                 }
             }
+        }
+    }
+
+    private func chooseMLXPath(key: String, directory: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = directory
+        panel.canChooseFiles = !directory
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(bookmark, forKey: "\(key).bookmark")
+            UserDefaults.standard.set(url.path, forKey: key)
+            mlxPathsVersion += 1
+        } catch {
+            NSAlert(error: error).runModal()
         }
     }
 
@@ -708,6 +762,8 @@ struct SettingsView: View {
                     hint: "Any service that speaks the OpenAI API: OpenRouter, OpenAI, Gemini, Groq, LM Studio… Costs aren't estimated for these."
                 )
             }
+        case .claudeCode, .codex, .gemini, .copilot, .customCLI:
+            CLIProviderSettings(kind: kind)
         }
     }
 

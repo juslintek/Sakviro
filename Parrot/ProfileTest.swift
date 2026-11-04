@@ -32,6 +32,7 @@ enum ProfileTest {
         testHallucinationFilter()
         testWAVEncoder()
         testAIUsageCost()
+        testCLIResponses()
         testPermissionFlow()
         testMicWatchdog()
         testCaptureClock()
@@ -130,6 +131,7 @@ enum ProfileTest {
         testNudgeSession()
         testNudgeReplay()
         testLanguageRouter()
+        testMLXImportBoundary()
         testLanguageProbe()
         testMismatchWatch()
         testEngineRecommendation()
@@ -147,6 +149,34 @@ enum ProfileTest {
         testUpdateNotice()
         print(failures == 0 ? "ALL PASS" : "FAILURES: \(failures)")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    private static func testCLIResponses() {
+        func answer(_ json: String) -> String? { try? CLIAnalysisProvider.claudeAnswer(Data(json.utf8)) }
+        check("CLI result object", answer("{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\"}") == "hello")
+        check("CLI result array", answer("[{\"type\":\"system\"},{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\"}]") == "hello")
+        check("CLI result JSONL", answer("{\"type\":\"system\"}\n{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\"}") == "hello")
+        check("CLI error rejected", answer("{\"type\":\"result\",\"is_error\":true,\"result\":\"failed\"}") == nil)
+        check("CLI truncated output rejected", answer("[{\"type\":\"result\"") == nil)
+        let gemini = Data("{\"response\":\"hello\"}".utf8)
+        check("CLI Gemini output", (try? CLIAnalysisProvider.customAnswer(gemini, format: "gemini")) == "hello")
+        let codex = Data("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hello\"}}\n{\"type\":\"turn.completed\"}".utf8)
+        check("CLI Codex output", (try? CLIAnalysisProvider.customAnswer(codex, format: "codex")) == "hello")
+        let codexWithOtherItem = Data("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hello\"}}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\"}}\n{\"type\":\"turn.completed\"}".utf8)
+        check("CLI Codex selects answer", (try? CLIAnalysisProvider.customAnswer(codexWithOtherItem, format: "codex")) == "hello")
+        let codexPartial = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hello\"}}"
+        check("CLI Codex incomplete turn rejected", (try? CLIAnalysisProvider.customAnswer(Data(codexPartial.utf8), format: "codex")) == nil)
+        check("CLI Codex failed turn rejected", (try? CLIAnalysisProvider.customAnswer(Data((codexPartial + "\n{\"type\":\"turn.failed\"}").utf8), format: "codex")) == nil)
+        check("CLI Codex truncated event rejected", (try? CLIAnalysisProvider.customAnswer(Data((codexPartial + "\n{\"type\":\"turn.completed\"").utf8), format: "codex")) == nil)
+        let copilot = Data("{\"type\":\"assistant.message\",\"data\":{\"content\":\"hello\"}}".utf8)
+        check("CLI Copilot output", (try? CLIAnalysisProvider.customAnswer(copilot, format: "copilot")) == "hello")
+        check("CLI Copilot error after answer rejected", (try? CLIAnalysisProvider.customAnswer(Data((String(decoding: copilot, as: UTF8.self) + "\n{\"type\":\"session.error\"}").utf8), format: "copilot")) == nil)
+        check("CLI Gemini error rejected", (try? CLIAnalysisProvider.customAnswer(Data("{\"response\":\"hello\",\"error\":{}}".utf8), format: "gemini")) == nil)
+        check("CLI missing final rejected", (try? CLIAnalysisProvider.customAnswer(Data("{\"type\":\"session.error\"}".utf8), format: "copilot")) == nil)
+        var usage = AIUsage()
+        usage.copilotProvider = CopilotProviderKind.claudeCode.rawValue
+        usage.copilot.calls = 1
+        check("CLI account cost unknown", usage.costBreakdown().first?.priced == false)
     }
 
     @MainActor
@@ -1017,6 +1047,14 @@ enum ProfileTest {
               AudioCaptureManager.micOut(voice, muted: true) == [0, 0, 0, 0])
         check("mute me: unmuted mic passes untouched", AudioCaptureManager.micOut(voice, muted: false) == voice)
         check("mute me: its shortcut isn't Mark's", GlobalHotKey.Combo.muteMe != GlobalHotKey.Combo.markMoment)
+    }
+
+    static func testMLXImportBoundary() {
+        var samples = [Float](repeating: 0.1, count: 600_000)
+        samples.replaceSubrange(400_000..<403_200, with: repeatElement(0, count: 3_200))
+        check("MLX import cuts within a pause", (try? MLXTranscriber.importBoundary(samples, from: 0)) == 401_600)
+        check("MLX import keeps the tail", (try? MLXTranscriber.importBoundary(samples, from: 401_600)) == samples.count)
+        check("MLX import rejects a forced speech cut", (try? MLXTranscriber.importBoundary([Float](repeating: 0.1, count: 600_000), from: 0)) == nil)
     }
 
     static func testCaptureClock() {
@@ -4792,6 +4830,11 @@ enum ProfileTest {
         }
         let backendKey = TranscriptionBackend.defaultsKey
 
+        fresh(); d.set("codex", forKey: "copilotProvider"); d.set(true, forKey: "copilotEnabled")
+        CopilotPathSettings.apply(choices(.cli), to: d)
+        check("setup: configured CLI and Assistant survive onboarding",
+              d.string(forKey: "copilotProvider") == "codex" && d.bool(forKey: "copilotEnabled")
+              && !OnboardingFlow.steps(mode: .full, path: .cli).contains(.copilotSetup))
         fresh(); CopilotPathSettings.apply(choices(.private), to: d)
         check("setup: private uses Ollama and local speech",
               d.string(forKey: "copilotProvider") == "ollama" && d.string(forKey: "copilotOllamaModel") == "gemma3:4b"

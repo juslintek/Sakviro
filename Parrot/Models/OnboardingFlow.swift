@@ -8,7 +8,7 @@ enum OnboardingStep: String, CaseIterable {
 
 /// How Copilot runs, picked on "How should Copilot work?".
 enum CopilotPath: String, CaseIterable {
-    case `private`, balanced, cloud, later
+    case `private`, balanced, cloud, cli, later
     static let defaultsKey = "onboardingCopilotPath"
 }
 
@@ -27,14 +27,14 @@ enum OnboardingFlow {
     static func steps(mode: OnboardingMode, path: CopilotPath?) -> [OnboardingStep] {
         switch mode {
         case .copilot:
-            let setup: [OnboardingStep] = (path == nil || path == .later) ? [] : [.copilotSetup]
+            let setup: [OnboardingStep] = (path == nil || path == .later || path == .cli) ? [] : [.copilotSetup]
             return [.meetCopilot, .copilotPath] + setup + [.ready]
         case .full:
             let middle: [OnboardingStep]
             switch path {
             case .private?, .balanced?: middle = [.speechModel, .copilotSetup]
             case .cloud?: middle = [.copilotSetup]
-            case .later?, nil: middle = [.speechModel]
+            case .cli?, .later?, nil: middle = [.speechModel]
             }
             // Claude, Cursor and Codex send what they read to their company, so
             // someone who asked for nothing to leave the Mac isn't pitched it.

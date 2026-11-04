@@ -21,7 +21,7 @@ struct SpeechModelStep: View {
         ("small", "~460 MB", "Better accuracy, moderate speed"),
         ("large-v3-v20240930_626MB", "~626 MB", "Near-best accuracy, light on memory"),
         ("large-v3-turbo", "~1.6 GB", "Best accuracy, needs more RAM"),
-    ]
+    ] + MLXTranscriber.models.map { ($0.id, "local model", "Uses the model folder configured in Settings") }
     private static let shortList: Set<String> = [ParakeetTranscriber.modelID, "base", "large-v3-v20240930_626MB", "large-v3-turbo"]
 
     var body: some View {

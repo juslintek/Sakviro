@@ -45,6 +45,7 @@ struct MeetingDetailView: View {
     @State private var tab: ReportTab = .report
     @State private var themNameText = ""
     @State private var showCostBreakdown = false
+    @State private var videoMuxing = false
     @State private var cardNamingLabel: String?
     @State private var clipStopTask: Task<Void, Never>?
     @State private var playingClip = false
@@ -333,6 +334,7 @@ struct MeetingDetailView: View {
                 aiCostRow(usage)
             }
 
+            videoRow
             privacyRow
 
             // Name the other party so the transcript/report read naturally.
@@ -349,6 +351,51 @@ struct MeetingDetailView: View {
         }
         .padding(Theme.Metrics.pad)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var videoRow: some View {
+        if meeting.videoPath != nil || meeting.rawVideoPath != nil || meeting.videoError != nil || meeting.videoWarning != nil {
+            HStack {
+                if let path = meeting.videoPath ?? meeting.rawVideoPath,
+                   let url = VideoCaptureService.ownedURL(path), FileManager.default.fileExists(atPath: url.path) {
+                    Button(meeting.videoPath == nil ? "Open raw video (no audio)" : "Open video") { NSWorkspace.shared.open(url) }
+                    Button(meeting.videoPath == nil ? "Save raw video…" : "Save video…") {
+                        let panel = NSSavePanel()
+                        panel.nameFieldStringValue = "\(meeting.title).mp4"
+                        panel.allowedContentTypes = [.mpeg4Movie]
+                        if panel.runModal() == .OK, let destination = panel.url {
+                            do {
+                                guard url.standardizedFileURL != destination.standardizedFileURL else { return }
+                                let temporary = destination.deletingLastPathComponent().appendingPathComponent(".parrot-\(UUID().uuidString).mp4")
+                                try FileManager.default.copyItem(at: url, to: temporary)
+                                do {
+                                    if FileManager.default.fileExists(atPath: destination.path) {
+                                        _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+                                    } else {
+                                        try FileManager.default.moveItem(at: temporary, to: destination)
+                                    }
+                                } catch {
+                                    try? FileManager.default.removeItem(at: temporary)
+                                    throw error
+                                }
+                            } catch { actionMessage = error.localizedDescription }
+                        }
+                    }
+                }
+                if meeting.videoError != nil, meeting.rawVideoPath != nil {
+                    Button(videoMuxing ? "Preparing…" : "Retry video with audio") {
+                        videoMuxing = true
+                        Task {
+                            await recordingManager.retryVideoMux(meeting)
+                            videoMuxing = false
+                        }
+                    }.disabled(videoMuxing)
+                }
+                if let error = meeting.videoError { Text("Video: \(error)").foregroundStyle(.red) }
+                if let warning = meeting.videoWarning { Text("Video: \(warning)").foregroundStyle(.red) }
+            }.font(Theme.Typography.caption)
+        }
     }
 
     /// "What left this Mac" (from the meeting's own usage record) and the
@@ -450,11 +497,11 @@ struct MeetingDetailView: View {
             HStack(spacing: 6) {
                 Image(systemName: "cpu")
                     .foregroundStyle(Theme.Colors.ink2)
-                Text("AI cost ~\(AIUsage.formatUSD(usage.totalUSD))")
+                Text("AI cost \(usage.costBreakdown().contains { !$0.priced } ? "(partial) " : "~")\(AIUsage.formatUSD(usage.totalUSD))")
                     .fontWeight(.medium)
                     .foregroundStyle(Theme.Colors.ink)
                 Text(usage.costBreakdown()
-                    .map { "\($0.label) \(AIUsage.formatUSD($0.usd))" }
+                    .map { "\($0.label) \($0.priced ? AIUsage.formatUSD($0.usd) : "account usage not tracked")" }
                     .joined(separator: " · "))
                     .foregroundStyle(Theme.Colors.ink2)
                     .lineLimit(1)
@@ -484,7 +531,7 @@ struct MeetingDetailView: View {
                             .foregroundStyle(Theme.Colors.ink2)
                     }
                     Spacer(minLength: 24)
-                    Text(AIUsage.formatUSD(item.usd))
+                    Text(item.priced ? AIUsage.formatUSD(item.usd) : "Not tracked")
                         .font(Theme.Typography.mono(11))
                 }
             }
