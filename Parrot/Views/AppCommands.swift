@@ -51,9 +51,10 @@ extension Notification.Name {
 /// and the detail toolbar. Exports write to Downloads and reveal in Finder.
 @MainActor
 enum MeetingActions {
-    nonisolated static let repoURL = "https://github.com/turantekin/Parrot"
+    nonisolated static var isFork: Bool { appName == "Sakviro" }
+    nonisolated static var repoURL: String { isFork ? "https://github.com/juslintek/Sakviro" : "https://github.com/turantekin/Parrot" }
     /// The landing page: a scrolling demo, the honest privacy list, and the download.
-    nonisolated static let websiteURL = "https://openparrot.app"
+    nonisolated static var websiteURL: String { isFork ? repoURL : "https://openparrot.app" }
     nonisolated static let xURL = "https://x.com/OpenParrotHQ"
     /// X's follow intent: the profile opens with a one-click Follow prompt.
     nonisolated static let xFollowURL = "https://x.com/intent/follow?screen_name=OpenParrotHQ"
@@ -102,15 +103,16 @@ enum MeetingActions {
         if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
     }
 
-    static var appName: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Parrot"
+    nonisolated static var appName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Parrot"
     }
 
     static func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [
             .credits: NSAttributedString(
-                string: "On-device, private meeting recorder.\n\(repoURL)",
+                string: "On-device, private meeting recorder.\n\(repoURL)" + (isFork ? "\nBased on Parrot: https://github.com/turantekin/Parrot" : ""),
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 11),
                     .foregroundColor: NSColor.secondaryLabelColor,
@@ -252,24 +254,22 @@ struct ParrotCommands: Commands {
         // Help: the bundled Apple Help Book (searchable, offline), plus the
         // same pages on the web and the project links.
         CommandGroup(replacing: .help) {
-            Button("Parrot Help") {
+            Button("\(MeetingActions.appName) Help") {
                 NSApp.showHelp(nil)
             }
-            Button("Parrot Help on the Web") {
-                MeetingActions.open("https://turantekin.github.io/Parrot/help/")
-            }
-            Button("Parrot Website") {
-                MeetingActions.open(MeetingActions.websiteURL)
+            if !MeetingActions.isFork {
+                Button("Parrot Help on the Web") { MeetingActions.open("https://turantekin.github.io/Parrot/help/") }
+                Button("Parrot Website") { MeetingActions.open(MeetingActions.websiteURL) }
             }
             Button("Show Welcome Tour") {
                 MeetingActions.showWelcomeTour()
             }
             Divider()
-            Button("Parrot on GitHub") {
+            Button("\(MeetingActions.appName) on GitHub") {
                 MeetingActions.open(MeetingActions.repoURL)
             }
-            Button("Parrot on X") {
-                MeetingActions.open(MeetingActions.xURL)
+            if !MeetingActions.isFork {
+                Button("Parrot on X") { MeetingActions.open(MeetingActions.xURL) }
             }
             Button("Report a Bug…") {
                 NotificationCenter.default.post(name: .parrotReportBug, object: nil)

@@ -12,7 +12,7 @@ final class RemindersService {
         case denied, noSource
         var errorDescription: String? {
             switch self {
-            case .denied: "Parrot isn't allowed to add reminders. Allow it under Privacy & Security → Reminders."
+            case .denied: "\(MeetingActions.appName) isn't allowed to add reminders. Allow it under Privacy & Security → Reminders."
             case .noSource: "No reminders account found on this Mac."
             }
         }
@@ -30,7 +30,7 @@ final class RemindersService {
         for item in items {
             let reminder = EKReminder(eventStore: store)
             reminder.title = String(item.prefix(300))
-            reminder.notes = "From “\(meetingTitle)” in Parrot"
+            reminder.notes = "From “\(meetingTitle)” in \(MeetingActions.appName)"
             reminder.calendar = list
             try store.save(reminder, commit: false)
         }
@@ -210,7 +210,7 @@ enum Webhook {
         }
         let body = (try? JSONSerialization.data(withJSONObject: [
             "event": "test", "sent_at": ISO8601DateFormatter().string(from: .now),
-            "message": "Hello from Parrot. Real calls arrive as event \"meeting.finished\".",
+            "message": "Hello from \(MeetingActions.appName). Real calls arrive as event \"meeting.finished\".",
         ], options: [.sortedKeys])) ?? Data()
         try await post(body, to: url)
     }

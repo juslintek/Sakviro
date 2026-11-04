@@ -15,7 +15,7 @@ struct ProfileReviewView: View {
 
     private var decoded: Result<ProfileFile, ProfileFile.Refused> {
         do { return .success(try ProfileFile.decode(item.data)) } catch {
-            return .failure(error as? ProfileFile.Refused ?? .init(reason: "This isn't a Parrot profile, or it's damaged."))
+            return .failure(error as? ProfileFile.Refused ?? .init(reason: "This isn't a \(MeetingActions.appName) profile, or it's damaged."))
         }
     }
 
@@ -44,7 +44,7 @@ struct ProfileReviewView: View {
 
     private func refusedView(_ reason: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Parrot can't use this profile")
+            Text("\(MeetingActions.appName) can't use this profile")
                 .font(Theme.Typography.title())
                 .foregroundStyle(Theme.Colors.ink)
             Text(reason)
@@ -215,7 +215,7 @@ struct ProfileSuggestionBanner: View {
     let later: () -> Void
 
     private var text: String {
-        guard let file = try? ProfileFile.decode(item.data) else { return "An AI app sent a profile Parrot can't use." }
+        guard let file = try? ProfileFile.decode(item.data) else { return "An AI app sent a profile \(MeetingActions.appName) can't use." }
         let who = AIApps.appName(file.suggestion?.from)
         if let target = ProfileStore.target(for: file, in: profiles) { return "\(who) suggested changes to \u{201C}\(target.name)\u{201D}." }
         return "\(who) suggested a new profile: \u{201C}\(file.profile.name)\u{201D}."

@@ -66,6 +66,7 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # Info.plist is xcodegen-managed and still has $(VAR) placeholders that Xcode
 # would normally substitute — substitute them here instead.
 cp Parrot/Info.plist "$PLIST"
+python3 scripts/display-name-plist.py "$PLIST" Parrot
 plutil -replace CFBundleExecutable        -string Parrot            "$PLIST"
 plutil -replace CFBundleIdentifier        -string com.uygar.parrot  "$PLIST"
 plutil -replace CFBundleName              -string Parrot            "$PLIST"

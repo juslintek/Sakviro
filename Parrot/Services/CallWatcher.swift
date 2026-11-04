@@ -167,7 +167,7 @@ final class CallWatcher: NSObject, UNUserNotificationCenterDelegate {
                     let started = await manager.startDetectedCall(appID: appID)
                     autoStartInFlight = false
                     if started {
-                        post(id: Self.promptID, title: "Parrot is recording",
+                        post(id: Self.promptID, title: "\(MeetingActions.appName) is recording",
                              body: "Your \(eventTitle.map { "“\($0)” " } ?? "")\(name) call is being recorded.",
                              category: Self.stopCategory)
                     } else {
@@ -177,7 +177,7 @@ final class CallWatcher: NSObject, UNUserNotificationCenterDelegate {
             } else {
                 prompt = Prompt(kind: .start, appID: appID, appName: name, eventTitle: eventTitle)
                 post(id: Self.promptID, title: "\(name) call started",
-                     body: eventTitle.map { "Record “\($0)” with Parrot?" } ?? "Record it with Parrot?",
+                     body: eventTitle.map { "Record “\($0)” with \(MeetingActions.appName)?" } ?? "Record it with \(MeetingActions.appName)?",
                      category: Self.startCategory)
             }
 
@@ -193,7 +193,7 @@ final class CallWatcher: NSObject, UNUserNotificationCenterDelegate {
             } else {
                 prompt = Prompt(kind: .stop, appID: "", appName: "", eventTitle: nil)
                 post(id: Self.promptID, title: "Call ended?",
-                     body: "Parrot is still recording.", category: Self.stopCategory)
+                     body: "\(MeetingActions.appName) is still recording.", category: Self.stopCategory)
             }
         }
     }
@@ -243,8 +243,8 @@ final class CallWatcher: NSObject, UNUserNotificationCenterDelegate {
             let title = event.title.isEmpty ? "Your meeting" : event.title
             post(id: "parrot-meeting-\(event.id.hashValue)", title: "\(title) starts in a minute",
                  body: AutoRecordMode.current == .off
-                    ? "Want Parrot to record it?"
-                    : "Parrot will offer to record when the call starts.",
+                    ? "Want \(MeetingActions.appName) to record it?"
+                    : "\(MeetingActions.appName) will offer to record when the call starts.",
                  category: Self.meetingCategory)
         }
     }

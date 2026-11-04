@@ -201,7 +201,7 @@ struct AskPageView: View {
 
     private var aiMenu: some View {
         Menu {
-            Picker("Ask Parrot uses", selection: $askProvider) {
+            Picker("Ask \(MeetingActions.appName) uses", selection: $askProvider) {
                 Text("Same as reports").tag("")
                 ForEach(CopilotProviderKind.allCases) { Text($0.label).tag($0.rawValue) }
             }
@@ -247,7 +247,7 @@ struct AskPageView: View {
         HStack(alignment: .top, spacing: Theme.Metrics.chipInsetH * 1.5) {
             ParrotAvatar()
             VStack(alignment: .leading, spacing: Theme.Metrics.chipInsetH) {
-                Text("**Ask Parrot is new.** It's still learning, so an answer can miss something. Click a time to see where it came from. Tell us what worked and what didn't.")
+                Text("**Ask \(MeetingActions.appName) is new.** It's still learning, so an answer can miss something. Click a time to see where it came from. Tell us what worked and what didn't.")
                     .font(Theme.Typography.secondary)
                     .foregroundStyle(Theme.Colors.ink2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -271,7 +271,7 @@ struct AskPageView: View {
             Text("Get written answers")
                 .font(Theme.Typography.sectionLabel)
                 .foregroundStyle(Theme.Colors.label)
-            Text("Without an AI, Parrot shows the closest moments from your meetings. Pick one to get answers:")
+            Text("Without an AI, \(MeetingActions.appName) shows the closest moments from your meetings. Pick one to get answers:")
                 .font(Theme.Typography.secondary)
                 .foregroundStyle(Theme.Colors.ink2)
                 .fixedSize(horizontal: false, vertical: true)

@@ -232,7 +232,7 @@ struct LiveRecordingView: View {
         }
         .buttonStyle(.plain)
         .disabled(recordingManager.isStopping)
-        .help("Stop recording your side until you unmute. Muting in Zoom or Teams doesn't reach Parrot. \(GlobalHotKey.Combo.muteMe.display) works from any app.")
+        .help("Stop recording your side until you unmute. Muting in Zoom or Teams doesn't reach \(MeetingActions.appName). \(GlobalHotKey.Combo.muteMe.display) works from any app.")
     }
 
     // MARK: - Mark moment
@@ -313,7 +313,7 @@ struct LiveRecordingView: View {
                     .foregroundStyle(Theme.Colors.warn)
             }
             if cap.micMuted {
-                Label("muted — Parrot isn't recording you", systemImage: "mic.slash.circle.fill")
+                Label("muted — \(MeetingActions.appName) isn't recording you", systemImage: "mic.slash.circle.fill")
                     .font(.appCaption2)
                     .foregroundStyle(Theme.Colors.warn)
             }
@@ -326,7 +326,7 @@ struct LiveRecordingView: View {
                         .foregroundStyle(Theme.Colors.warn)
                 }
                 .buttonStyle(.plain)
-                .help("Open Microphone privacy settings and enable Parrot")
+                .help("Open Microphone privacy settings and enable \(MeetingActions.appName)")
             }
 
             if cap.micVeryQuiet {
@@ -338,14 +338,14 @@ struct LiveRecordingView: View {
                         .foregroundStyle(Theme.Colors.warn)
                 }
                 .buttonStyle(.plain)
-                .help("Your voice reaches Parrot far below normal speech level — usually a low input volume in System Settings → Sound. Transcription still works, but accuracy improves with more signal.")
+                .help("Your voice reaches \(MeetingActions.appName) far below normal speech level — usually a low input volume in System Settings → Sound. Transcription still works, but accuracy improves with more signal.")
             }
 
             if cap.micSignalLost {
                 Label("mic muted by another app — reclaiming", systemImage: "mic.slash.circle.fill")
                     .font(.appCaption2)
                     .foregroundStyle(Theme.Colors.warn)
-                    .help("macOS is delivering pure silence from the microphone — usually a call app (browser meeting, Zoom) holding it. Parrot retries automatically and recovers the moment the mic frees up. Everyone else's audio keeps recording meanwhile.")
+                    .help("macOS is delivering pure silence from the microphone — usually a call app (browser meeting, Zoom) holding it. \(MeetingActions.appName) retries automatically and recovers the moment the mic frees up. Everyone else's audio keeps recording meanwhile.")
             }
 
             if cap.echoCancellerStarved {
@@ -359,7 +359,7 @@ struct LiveRecordingView: View {
                 Label("headphones recommended", systemImage: "headphones")
                     .font(.appCaption2)
                     .foregroundStyle(Theme.Colors.warn)
-                    .help("Your mic is hearing the other side through the speakers. Parrot filters most of it out, but headphones give a cleaner transcript.")
+                    .help("Your mic is hearing the other side through the speakers. \(MeetingActions.appName) filters most of it out, but headphones give a cleaner transcript.")
             }
 
             if let notice = recordingManager.transcriptionEngine.cloudNotice {
@@ -511,7 +511,7 @@ struct LiveRecordingView: View {
                         if recordingManager.currentMeeting?.segments.isEmpty == true
                             && recordingManager.transcriptionEngine.currentText.isEmpty
                             && !recordingManager.transcriptionEngine.isHearingSpeech {
-                            Text("Parrot is listening...")
+                            Text("\(MeetingActions.appName) is listening...")
                                 .font(Theme.Typography.body)
                                 .foregroundStyle(Theme.Colors.ink3)
                                 .italic()
@@ -800,7 +800,7 @@ struct LanguageMismatchBanner: View {
                 .font(.appTitle3)
                 .foregroundStyle(Theme.Colors.warn)
             VStack(alignment: .leading, spacing: 2) {
-                Text(currentName.map { "This call sounds like \(name), but Parrot is set to \($0)." }
+                Text(currentName.map { "This call sounds like \(name), but \(MeetingActions.appName) is set to \($0)." }
                      ?? "This call sounds like \(name).")
                     .font(Theme.Typography.cardTitle)
                     .foregroundStyle(Theme.Colors.ink)

@@ -21,7 +21,7 @@ struct RewriteReportSheet: View {
             Text("Rewrite this report")
                 .font(Theme.Typography.title())
                 .foregroundStyle(Theme.Colors.ink)
-            Text("Parrot writes the report again from the transcript, using a profile's report. The current one is kept, so you can undo.")
+            Text("\(MeetingActions.appName) writes the report again from the transcript, using a profile's report. The current one is kept, so you can undo.")
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.ink2)
                 .fixedSize(horizontal: false, vertical: true)

@@ -67,6 +67,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.uygar.parrot
         PRODUCT_NAME: Parrot
+        PRODUCT_DISPLAY_NAME: Parrot
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Parrot/Info.plist
@@ -130,20 +131,20 @@ targets:
         # REQUIRED for mic access: without this string macOS crashes the app on
         # first mic use and never shows it in Privacy → Microphone. Must live here
         # because xcodegen regenerates Info.plist on every generate.
-        NSMicrophoneUsageDescription: "Parrot records your microphone so it can transcribe your side of the meeting on-device."
+        NSMicrophoneUsageDescription: "$(PRODUCT_DISPLAY_NAME) records your microphone so it can transcribe your side of the meeting on-device."
         # Shown when macOS asks for Screen Recording, which Parrot uses to capture
         # system audio via ScreenCaptureKit. Also lives here so xcodegen keeps it.
-        NSScreenCaptureUsageDescription: "Parrot captures system audio and, when you choose to record video, the meeting window."
+        NSScreenCaptureUsageDescription: "$(PRODUCT_DISPLAY_NAME) captures system audio and, when you choose to record video, the meeting window."
         # macOS 15+: shown by the audio-only "System Audio Recording" consent
         # prompt (Core Audio process tap). This replaces the Screen Recording
         # ask on modern macOS; without the key the tap is silently denied.
-        NSAudioCaptureUsageDescription: "Parrot records your meeting's audio (what you hear) to transcribe it on-device. It never sees your screen."
+        NSAudioCaptureUsageDescription: "$(PRODUCT_DISPLAY_NAME) records your meeting's audio (what you hear) to transcribe it on-device. It never sees your screen."
         # macOS 14+ calendar prompt (EventKit full access — needed to read
         # events; Parrot never writes to the calendar). Opt-in: asked only
         # when the user clicks Connect Calendar.
         # Asked only when the user clicks "Add Next Steps to Reminders".
-        NSRemindersFullAccessUsageDescription: "Parrot adds a call's next steps to a Parrot list in Reminders when you ask it to."
-        NSCalendarsFullAccessUsageDescription: "Parrot reads your calendar to name your meetings and know who's on the call. It never changes your calendar, and nothing leaves your Mac."
+        NSRemindersFullAccessUsageDescription: "$(PRODUCT_DISPLAY_NAME) adds a call's next steps to a Parrot list in Reminders when you ask it to."
+        NSCalendarsFullAccessUsageDescription: "$(PRODUCT_DISPLAY_NAME) reads your calendar to name your meetings and know who's on the call. It never changes your calendar, and nothing leaves your Mac."
         # The in-app Help Book (docs/help, assembled by scripts/assemble-help.sh).
         # Both keys must live HERE, not only in Info.plist: xcodegen regenerates
         # the plist and silently dropped them once (7be0c1d), which broke
@@ -164,12 +165,12 @@ targets:
         # nothing changes until the user applies it.
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: com.uygar.parrot.profile
-            UTTypeDescription: Parrot call profile
+            UTTypeDescription: $(PRODUCT_DISPLAY_NAME) call profile
             UTTypeConformsTo: [public.json]
             UTTypeTagSpecification:
               public.filename-extension: [parrotprofile]
         CFBundleDocumentTypes:
-          - CFBundleTypeName: Parrot call profile
+          - CFBundleTypeName: $(PRODUCT_DISPLAY_NAME) call profile
             CFBundleTypeRole: Viewer
             LSHandlerRank: Owner
             LSItemContentTypes: [com.uygar.parrot.profile]

@@ -26,7 +26,7 @@ struct Consent: Codable, Equatable {
     static let noticeKey = "consentNotice"
     static let remindKey = "consentReminder"
 
-    static let defaultNotice = "Heads-up: I'm recording this call with Parrot so I can take notes. It runs on my own Mac. Tell me if you'd rather I didn't."
+    static let defaultNotice = "Heads-up: I'm recording this call with \(MeetingActions.appName) so I can take notes. It runs on my own Mac. Tell me if you'd rather I didn't."
 
     /// The user's notice text, or the default.
     static var currentNotice: String {

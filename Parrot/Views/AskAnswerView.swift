@@ -9,7 +9,7 @@ struct BetaTag: View {
             .padding(.horizontal, Theme.Metrics.chipInsetH)
             .padding(.vertical, Theme.Metrics.chipInsetV)
             .background(Theme.Colors.accent.opacity(0.12), in: Capsule())
-            .help("Ask Parrot is new and still improving")
+            .help("Ask \(MeetingActions.appName) is new and still improving")
     }
 }
 
@@ -52,7 +52,7 @@ struct ParrotAvatar: View {
                     .overlay(Circle().stroke(Theme.Colors.canvas, lineWidth: 1.5))
                     .offset(x: 2, y: 2)
             }
-            .accessibilityLabel("Parrot")
+            .accessibilityLabel(MeetingActions.appName)
     }
 }
 

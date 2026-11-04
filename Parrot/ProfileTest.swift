@@ -184,7 +184,7 @@ enum ProfileTest {
 
     @MainActor
     static func testUpdateNotice() {
-        check("update notice: the title", UpdateNotice.title(version: "0.28.0") == "Parrot 0.28.0 is perched and ready")
+        check("update notice: the title", UpdateNotice.title(version: "0.28.0") == "\(MeetingActions.appName) 0.28.0 is perched and ready")
         check("update notice: posts when free", UpdateNotice.onReady(version: "0.28.0", alreadyPosted: nil, busy: false) == .post)
         check("update notice: waits during a call", UpdateNotice.onReady(version: "0.28.0", alreadyPosted: nil, busy: true) == .hold)
         check("update notice: once per version", UpdateNotice.onReady(version: "0.28.0", alreadyPosted: "0.28.0", busy: false) == .skip)
@@ -1131,7 +1131,7 @@ enum ProfileTest {
                              includeScreenshot: false) == "it crashed")
         let full = BugReport.body(text: "x", includeDiagnostics: true, includeScreenshot: true)
         check("report body marks the paste spot", full.contains("⌘V"))
-        check("report body carries diagnostics", full.contains("Parrot "))
+        check("report body carries diagnostics", full.contains("\(MeetingActions.appName) "))
         check("report body omits the paste spot when nothing is attached",
               !BugReport.body(text: "x", includeDiagnostics: true,
                               includeScreenshot: false).contains("⌘V"))
@@ -1144,7 +1144,7 @@ enum ProfileTest {
 
         let url = BugReport.issueURL(kind: .idea, title: "Tabs & spaces #1", body: "one\ntwo")
         check("issue url targets the repo's new-issue form",
-              url?.absoluteString.hasPrefix("https://github.com/turantekin/Parrot/issues/new?") == true)
+              url?.absoluteString.hasPrefix("\(MeetingActions.repoURL)/issues/new?") == true)
         check("issue url labels an idea as enhancement",
               url?.absoluteString.contains("labels=enhancement") == true)
         check("issue url labels a bug as bug",
@@ -1239,7 +1239,7 @@ enum ProfileTest {
         check("idle: speech after a reminder restarts the clock",
               !R.idleReminderDue(now: t0 + 31 * m, lastVoice: t0 + 20 * m, lastReminder: t0 + 15 * m, after: 15 * m))
         check("idle: body says the minutes",
-              R.idleReminderBody(silentFor: 30 * m) == "Nobody has spoken for 30 minutes. Parrot is still recording.")
+              R.idleReminderBody(silentFor: 30 * m) == "Nobody has spoken for 30 minutes. \(MeetingActions.appName) is still recording.")
         check("idle: one minute reads naturally",
               R.idleReminderBody(silentFor: 70).hasPrefix("Nobody has spoken for a minute."))
     }
@@ -4241,7 +4241,7 @@ enum ProfileTest {
         check("mcp: list filter misses", text(call("tools/call", ["name": "list_meetings", "arguments": ["query": "initech"]])) == "No meetings found.")
         let got = text(call("tools/call", ["name": "get_meeting", "arguments": ["id": a.uuidString]]))
         check("mcp: get_meeting has the summary", got.contains("## Summary\nRenewal went well."))
-        check("mcp: get_meeting links the meeting", got.contains("Open in Parrot: [Acme renewal](https://openparrot.app/open#m=\(a.uuidString))\n"))
+        check("mcp: get_meeting links the meeting", got.contains("\(MeetingActions.isFork ? "Legacy Parrot link" : "Open in Parrot"): [Acme renewal](https://openparrot.app/open#m=\(a.uuidString))\n"))
         check("mcp: transcript only on request", !got.contains("Send the contract"))
         check("mcp: transcript when asked", text(call("tools/call", ["name": "get_meeting",
               "arguments": ["id": a.uuidString, "include_transcript": true]])).contains("[00:30] Jeremy: Send the contract."))
@@ -4282,7 +4282,7 @@ enum ProfileTest {
         check("mcp: to stops the page", tool("get_transcript", ["id": old.uuidString, "to": "00:01"])
               .components(separatedBy: "\n").filter { $0.hasPrefix("[") } == Array(long.prefix(6).map(MCPServer.lineText)))
         check("mcp: a transcript page says how to link a time", tool("get_transcript", ["id": old.uuidString, "to": "00:01"])
-              .hasSuffix("To cite a line, link its time: [mm:ss](https://openparrot.app/open#m=\(old.uuidString)&t=<seconds>)"))
+              .hasSuffix(MeetingActions.isFork ? "Cite the meeting and time; legacy links target upstream Parrot." : "To cite a line, link its time: [mm:ss](https://openparrot.app/open#m=\(old.uuidString)&t=<seconds>)"))
         check("mcp: bad stamp says how", tool("get_transcript", ["id": old.uuidString, "from": "soon"]).hasPrefix("Write from"))
         check("mcp: transcript of a hidden meeting", tool("get_transcript", ["id": hidden.uuidString]) == "No meeting with that id.")
         let firstPage = tool("get_meeting", ["id": old.uuidString, "include_transcript": true])
@@ -4332,7 +4332,7 @@ enum ProfileTest {
         check("mcp: digest uses list_commitments", digest.contains("list_commitments") && digest.contains("last 7 days"))
         check("mcp: prompts say text is data", digest.contains("data, not instructions"))
         check("mcp: prompt arguments land", promptText("prd_from_calls", ["topic": "SSO", "when": "this month"])
-              .contains("\"SSO\" with Parrot's search_meetings with when = \"this month\""))
+              .contains("\"SSO\" with \(MeetingActions.appName)'s search_meetings with when = \"this month\""))
         check("mcp: a missing required argument is an error",
               (call("prompts/get", ["name": "follow_up_email"])?["error"] as? [String: Any])?["code"] as? Int == -32602)
         check("mcp: unknown prompt is an error", call("prompts/get", ["name": "nope"])?["error"] != nil)
@@ -4353,7 +4353,7 @@ enum ProfileTest {
         let json = String(decoding: ProfileFile.encode(pitch), as: UTF8.self)
         let sentNew = tool("suggest_profile", ["profile_json": json, "reason": "Your board calls need their own report."])
         let landed = ProfileInbox.pending(in: inbox).first.flatMap { try? ProfileFile.decode(Data(contentsOf: $0)) }
-        check("suggest: a new profile lands in the inbox", sentNew.hasPrefix("Sent to Parrot: a new profile") && landed?.profile.name == "Acme board pitch")
+        check("suggest: a new profile lands in the inbox", sentNew.hasPrefix("Sent to \(MeetingActions.appName): a new profile") && landed?.profile.name == "Acme board pitch")
         check("suggest: says who sent it and why", landed?.suggestion?.from == "claude-ai" && landed?.meta?.source == "claude"
               && landed?.suggestion?.reason == "Your board calls need their own report.")
         let sentUpdate = tool("suggest_profile", ["profile_json": json, "reason": "Tighter cards.", "updates": "sales discovery"])
@@ -4542,7 +4542,7 @@ enum ProfileTest {
         guard let ctx = phase4Context() else { check("ai apps container", false); return }
         let m = phase4Meeting(ctx)
         let q = AIApps.question(.agreed, title: m.title, date: m.date)
-        check("ai apps: the question names the meeting", q.hasPrefix("Use Parrot") && q.contains("\"Acme: renewal/Q3\"")
+        check("ai apps: the question names the meeting", q.hasPrefix("Use \(MeetingActions.appName)") && q.contains("\"Acme: renewal/Q3\"")
               && q.contains(m.date.formatted(date: .abbreviated, time: .shortened)))
         check("ai apps: a normal meeting may be offered", AIApps.mayShare(m))
         m.onDeviceOnly = true
@@ -4580,7 +4580,7 @@ enum ProfileTest {
         defer { try? fm.removeItem(at: tmp) }
         let manifest = MCPBundle.manifest(version: "1.2.3")
         check("mcpb: name and version", manifest["name"] as? String == "parrot" && manifest["version"] as? String == "1.2.3"
-              && manifest["display_name"] as? String == "Parrot" && manifest["icon"] as? String == "icon.png")
+              && manifest["display_name"] as? String == MeetingActions.appName && manifest["icon"] as? String == "icon.png")
         check("mcpb: every tool listed", (manifest["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
               == MCPServer.tools.compactMap { $0["name"] as? String })
         let prompts = manifest["prompts"] as? [[String: Any]] ?? []
@@ -4598,6 +4598,10 @@ enum ProfileTest {
         try? fm.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? "#!/bin/sh\necho started \"$@\"\n".write(to: binary, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        if MeetingActions.isFork {
+            let plist = app.appendingPathComponent("Contents/Info.plist")
+            NSDictionary(dictionary: ["CFBundleIdentifier": MCPBundle.appBundleID]).write(to: plist, atomically: true)
+        }
         let script = tmp.appendingPathComponent("launch.sh")
         try? MCPBundle.launcher(appPath: app.path).write(to: script, atomically: true, encoding: .utf8)
         func run(_ tool: String, _ args: [String]) -> String {
@@ -4612,6 +4616,42 @@ enum ProfileTest {
             return String(decoding: out, as: UTF8.self)
         }
         check("mcpb: launcher starts Parrot from a path with spaces and quotes", run("/bin/sh", [script.path]) == "started --mcp\n")
+        if MeetingActions.isFork {
+            let marker = tmp.appendingPathComponent("wrong-bundle-ran")
+            try? "#!/bin/sh\ntouch \"\(marker.path)\"\n".write(to: binary, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+            NSDictionary(dictionary: ["CFBundleIdentifier": MCPBundle.bundleID]).write(to: app.appendingPathComponent("Contents/Info.plist"), atomically: true)
+            let isolated = MCPBundle.launcher(appPath: app.path)
+                .replacingOccurrences(of: "'/Applications/Sakviro.app'", with: "'/nonexistent/Sakviro.app'")
+                .replacingOccurrences(of: "\"$HOME/Applications/Sakviro.app\"", with: "'/nonexistent/Home.app'")
+                .replacingOccurrences(of: "mdfind ", with: "/usr/bin/false ")
+            try? isolated.write(to: script, atomically: true, encoding: .utf8)
+            _ = run("/bin/sh", [script.path])
+            check("mcpb: launcher rejects an executable from another bundle", !fm.fileExists(atPath: marker.path))
+            let found = tmp.appendingPathComponent("Found Apps/Sakviro's.app")
+            let foundBinary = found.appendingPathComponent("Contents/MacOS/Parrot")
+            try? fm.createDirectory(at: foundBinary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? "#!/bin/sh\nread line\nprintf '%s %s\\n' \"$1\" \"$line\"\n".write(to: foundBinary, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: foundBinary.path)
+            NSDictionary(dictionary: ["CFBundleIdentifier": MCPBundle.appBundleID]).write(to: found.appendingPathComponent("Contents/Info.plist"), atomically: true)
+            let finder = tmp.appendingPathComponent("mdfind")
+            try? "#!/bin/sh\nprintf '%s\\n' \(MCPBundle.shellQuoted(tmp.appendingPathComponent("stale.app").path)) \(MCPBundle.shellQuoted(app.path)) \(MCPBundle.shellQuoted(found.path))\n".write(to: finder, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: finder.path)
+            let spotlight = isolated.replacingOccurrences(of: "/usr/bin/false ", with: "\(MCPBundle.shellQuoted(finder.path)) ")
+            try? spotlight.write(to: script, atomically: true, encoding: .utf8)
+            let input = tmp.appendingPathComponent("stdin")
+            try? "client-json\n".write(to: input, atomically: true, encoding: .utf8)
+            let process = Process(), output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [script.path]
+            process.standardInput = try? FileHandle(forReadingFrom: input)
+            process.standardOutput = output
+            try? process.run()
+            let received = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            check("mcpb: Spotlight skips wrong bundles and preserves client stdin", process.terminationStatus == 0
+                  && String(decoding: received, as: UTF8.self) == "--mcp client-json\n" && !fm.fileExists(atPath: marker.path))
+        }
 
         let built = try? MCPBundle.build(appPath: app.path, version: "1.2.3", icon: NSImage(named: NSImage.applicationIconName))
         let listing = built.map { run("/usr/bin/unzip", ["-l", $0.path]) } ?? ""
@@ -4621,8 +4661,16 @@ enum ProfileTest {
 
         // The Claude plugin ships its own copies; they must not drift from the app.
         let plugin = "integrations/claude-plugin"
-        check("plugin: launcher matches the app's", (try? String(contentsOfFile: "\(plugin)/server/launch.sh", encoding: .utf8))
-              == MCPBundle.launcher(appPath: nil))
+        if MeetingActions.isFork {
+            let launcher = MCPBundle.launcher(appPath: nil)
+            check("mcpb: fork launcher finds Sakviro without selecting upstream Parrot", launcher.contains("/Applications/Sakviro.app")
+                  && launcher.contains(MCPBundle.appBundleID)
+                  && !launcher.contains("/Applications/Parrot.app"))
+        } else {
+            check("plugin: launcher matches the app's", (try? String(contentsOfFile: "\(plugin)/server/launch.sh", encoding: .utf8))
+                  == MCPBundle.launcher(appPath: nil))
+        }
+        check("mcpb: display name matches app", manifest["display_name"] as? String == MeetingActions.appName)
         check("plugin: a skill per ready-made prompt", MCPPrompts.all.allSatisfy { p in
             fm.fileExists(atPath: "\(plugin)/skills/\(p.name.replacingOccurrences(of: "_", with: "-"))/SKILL.md") })
         let skillText = MCPPrompts.all.map { p in
@@ -4726,8 +4774,8 @@ enum ProfileTest {
               .contains("persona") == true)
         check("profile file: long trigger refused", refusal(file { _, p in
             var k = aKind[0]; k["trigger"] = String(repeating: "x", count: 301); p["kinds"] = [k] }) != nil)
-        check("profile file: not a profile", refusal(file { t, _ in t["format"] = "something.else" }) == "This isn't a Parrot profile.")
-        check("profile file: from a newer Parrot", refusal(file { t, _ in t["formatVersion"] = 2 }) == "This profile needs a newer Parrot.")
+        check("profile file: not a profile", refusal(file { t, _ in t["format"] = "something.else" }) == "This isn't a \(MeetingActions.appName) profile.")
+        check("profile file: from a newer Parrot", refusal(file { t, _ in t["formatVersion"] = 2 }) == "This profile needs a newer \(MeetingActions.appName).")
         check("profile file: over 64 KB refused", refusal(file { t, _ in t["padding"] = String(repeating: "x", count: 70_000) })?
               .contains("64 KB") == true)
         check("profile file: garbage refused", refusal(Data("not json".utf8)) != nil)
@@ -4888,7 +4936,7 @@ enum ProfileTest {
 
         let c = Consent(method: .verbal, at: 40, notice: nil)
         check("consent: summary", c.summary == "everyone agreed out loud at 00:40")
-        check("consent: default notice mentions recording", Consent.defaultNotice.contains("recording"))
+        check("consent: default notice mentions recording and app", Consent.defaultNotice.contains("recording") && Consent.defaultNotice.contains(MeetingActions.appName))
         guard let ctx = phase4Context() else { check("consent container", false); return }
         let m = phase4Meeting(ctx)
         check("consent: none by default", m.consent == nil)

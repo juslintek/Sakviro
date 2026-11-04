@@ -913,7 +913,7 @@ final class RecordingManager {
             meeting.status = .failed
             // The raw error is a CoreAudio code ("ExtAudioFileRead -50"): no use
             // to the person looking at it. The log keeps it.
-            meeting.errorMessage = "Parrot couldn't read this audio file. Check it plays in QuickTime, then save it again as M4A or WAV and import that."
+            meeting.errorMessage = "\(MeetingActions.appName) couldn't read this audio file. Check it plays in QuickTime, then save it again as M4A or WAV and import that."
             try? modelContext?.save()
             return
         }
@@ -1000,7 +1000,7 @@ final class RecordingManager {
 
     nonisolated static func idleReminderBody(silentFor seconds: TimeInterval) -> String {
         let minutes = Int(seconds / 60)
-        return "Nobody has spoken for \(minutes <= 1 ? "a minute" : "\(minutes) minutes"). Parrot is still recording."
+        return "Nobody has spoken for \(minutes <= 1 ? "a minute" : "\(minutes) minutes"). \(MeetingActions.appName) is still recording."
     }
 
     /// A notification (it replaces the previous one, so they never pile up)

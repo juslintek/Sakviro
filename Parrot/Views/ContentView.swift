@@ -279,7 +279,7 @@ struct CallFinishedSheet: View {
                 .foregroundStyle(Theme.Colors.ink2)
 
             Text("Title").font(Theme.Typography.sectionLabel).foregroundStyle(Theme.Colors.label)
-            TextField("Leave blank and Parrot names it", text: $title)
+            TextField("Leave blank and \(MeetingActions.appName) names it", text: $title)
                 .textFieldStyle(.roundedBorder)
 
             Text("Note").font(Theme.Typography.sectionLabel).foregroundStyle(Theme.Colors.label)

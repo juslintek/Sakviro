@@ -37,7 +37,7 @@ enum ReportPDF {
 
         var body = """
         <header class="keep">
-        <div class="brand">\(iconTag())<span>Parrot</span><em>Call report</em></div>
+        <div class="brand">\(iconTag())<span>\(esc(MeetingActions.appName))</span><em>Call report</em></div>
         <h1>\(esc(meeting.title))</h1>
         <div class="facts">\(facts.map { "<div><span>\($0.0)</span>\(esc($0.1))</div>" }.joined())</div>
         <div class="facts people"><div><span>Attended</span>\(esc(people(meeting).joined(separator: ", ")))</div></div>
@@ -403,7 +403,7 @@ enum ReportPDF {
     private static func footed(_ doc: CGPDFDocument, title: String) -> Data {
         let out = NSMutableData()
         var box = doc.page(at: 1)?.getBoxRect(.mediaBox) ?? .zero
-        let meta = [kCGPDFContextTitle: title, kCGPDFContextCreator: "Parrot"] as CFDictionary
+        let meta = [kCGPDFContextTitle: title, kCGPDFContextCreator: MeetingActions.appName] as CFDictionary
         guard let consumer = CGDataConsumer(data: out),
               let ctx = CGContext(consumer: consumer, mediaBox: &box, meta) else { return Data() }
         let font = NSFont.systemFont(ofSize: 7.5)
@@ -417,7 +417,7 @@ enum ReportPDF {
             NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: gray]
             let y = media.minY + 26
-            let made = NSAttributedString(string: "Made with Parrot · openparrot.app", attributes: attrs)
+            let made = NSAttributedString(string: "Made with \(MeetingActions.appName) · \(MeetingActions.isFork ? "github.com/juslintek/Sakviro" : "openparrot.app")", attributes: attrs)
             made.draw(at: NSPoint(x: media.minX + margins.left, y: y))
             ctx.setURL(URL(string: MeetingActions.websiteURL)! as CFURL,
                        for: CGRect(x: media.minX + margins.left, y: y, width: made.size().width, height: made.size().height))

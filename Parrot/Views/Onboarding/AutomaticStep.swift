@@ -51,7 +51,7 @@ struct AutomaticStep: View {
                     .labelsHidden()
                     Text(autoRecordRaw == AutoRecordMode.auto.rawValue
                          ? "Records by itself. Many places require telling everyone on the call."
-                         : "Parrot only notices the mic is in use, never the audio.")
+                         : "\(MeetingActions.appName) only notices the mic is in use, never the audio.")
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.ink2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -64,7 +64,7 @@ struct AutomaticStep: View {
                         icon: "bell.badge",
                         askTitle: notifications == .off ? "Turn on notifications in Settings" : "Allow notifications",
                         grantedTitle: "Notifications on",
-                        subtitle: "So Parrot can ask to record when a call starts.",
+                        subtitle: "So \(MeetingActions.appName) can ask to record when a call starts.",
                         isGranted: notifications == .on,
                         action: { Task { notifications = await NotificationAccess.turnOn() } }
                     )
@@ -72,14 +72,14 @@ struct AutomaticStep: View {
 
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Open Parrot at login")
+                        Text("Open \(MeetingActions.appName) at login")
                             .font(Theme.Typography.cardTitle)
                         Text("So it's ready for your first call of the day.")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Colors.ink2)
                     }
                     Spacer(minLength: 0)
-                    Toggle("Open Parrot at login", isOn: Binding(
+                    Toggle("Open \(MeetingActions.appName) at login", isOn: Binding(
                         get: { loginItemOn },
                         set: { newValue in
                             let state = LoginItem.set(newValue).state

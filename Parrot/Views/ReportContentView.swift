@@ -139,7 +139,7 @@ struct UnverifiedTag: View {
             .font(Theme.Typography.caption)
             .foregroundStyle(Theme.Colors.warn)
             .labelStyle(.titleAndIcon)
-            .help("Parrot couldn't find this in the transcript. Check it before acting on it.")
+            .help("\(MeetingActions.appName) couldn't find this in the transcript. Check it before acting on it.")
             .accessibilityLabel("Unverified: no matching line in the transcript")
     }
 }
@@ -173,7 +173,7 @@ struct ScoreRow: View {
                     Text(row.uncited ? "no moment cited" : "not enough evidence")
                         .font(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.ink3)
-                        .help(row.uncited ? "The report gave a score without pointing to a moment in the call, so Parrot doesn't show it." : "")
+                        .help(row.uncited ? "The report gave a score without pointing to a moment in the call, so \(MeetingActions.appName) doesn't show it." : "")
                 }
             }
             if row.score != nil {

@@ -164,7 +164,7 @@ struct ProfileReportCard: View {
                         .controlSize(.small)
                 }
                 if section.commitments == true {
-                    Hint("Parrot checks each one against the transcript and uses them for Reminders, open items and \"what did I promise?\".")
+                    Hint("\(MeetingActions.appName) checks each one against the transcript and uses them for Reminders, open items and \"what did I promise?\".")
                 }
             }
 

@@ -312,7 +312,7 @@ private struct ProfileDetailView: View {
                          blurb: "The last \(CallProfile.maxVersions) are kept. Restoring saves the current one first, so it can be undone too.") {
                 if profile.versions.isEmpty {
                     SettingsRow(first: true) {
-                        Hint("None yet. Parrot saves one before an import, a suggestion or a report change.")
+                        Hint("None yet. \(MeetingActions.appName) saves one before an import, a suggestion or a report change.")
                     }
                 }
                 ForEach(Array(profile.versions.reversed().enumerated()), id: \.offset) { index, version in

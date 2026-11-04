@@ -16,6 +16,98 @@ mkdir -p "$LPROJ"
 cp "$SRC"/*.html "$SRC"/help.css "$LPROJ/"
 cp -R "$SRC/img" "$LPROJ/img"
 
+DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist")
+if [ "$DISPLAY_NAME" = "Sakviro" ]; then
+  python3 - "$LPROJ" "$DISPLAY_NAME" <<'PYHELP'
+from html import escape, unescape
+from html.parser import HTMLParser
+import re
+from pathlib import Path
+import sys
+
+class HelpText(HTMLParser):
+    def __init__(self, replace_text=True):
+        super().__init__(convert_charrefs=False)
+        self.parts = []
+        self.protected = []
+        self.replace_text = replace_text
+
+    def branded_tag(self, tag, attrs):
+        original = self.get_starttag_text()
+        if self.protected or tag in ('code', 'pre', 'script', 'style'):
+            return original
+        names = {'alt', 'title', 'aria-label'}
+        if tag == 'meta' and dict(attrs).get('name', '').lower() in ('appletitle', 'description'):
+            names.add('content')
+        def replace_attr(match):
+            if match.group(1).lower() not in names:
+                return match.group(0)
+            value = unescape(match.group(3))
+            branded = value.replace('Parrot Exports', '\x00Exports').replace('Parrot', sys.argv[2]).replace('\x00Exports', 'Parrot Exports')
+            return match.group(0) if branded == value else match.group(1) + '=' + match.group(2) + escape(branded, quote=True) + match.group(2)
+        return re.sub(r"([\w:-]+)\s*=\s*([\"'])(.*?)\2", replace_attr, original, flags=re.DOTALL)
+
+    def handle_starttag(self, tag, attrs):
+        self.parts.append(self.branded_tag(tag, attrs))
+        if tag in ('code', 'pre', 'script', 'style'):
+            self.protected.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self.parts.append(self.branded_tag(tag, attrs))
+
+    def handle_endtag(self, tag):
+        self.parts.append(f'</{tag}>')
+        if self.protected and self.protected[-1] == tag:
+            self.protected.pop()
+
+    def handle_data(self, value):
+        if self.replace_text and not self.protected and 'github.com/' not in value:
+            value = value.replace('Parrot Exports', '\x00Exports').replace('Parrot', sys.argv[2]).replace('\x00Exports', 'Parrot Exports')
+        self.parts.append(value)
+
+    def handle_entityref(self, name): self.parts.append(f'&{name};')
+    def handle_charref(self, name): self.parts.append(f'&#{name};')
+    def handle_comment(self, value): self.parts.append(f'<!--{value}-->')
+    def handle_decl(self, value): self.parts.append(f'<!{value}>')
+    def handle_pi(self, value): self.parts.append(f'<?{value}>')
+
+for path in Path(sys.argv[1]).glob('*.html'):
+    original = path.read_text()
+    if path.name == 'hi.html':
+        original = original.replace('← Parrot Help', '← Sakviro Help').replace("<h1>Hi, I'm Uygar 👋</h1>", "<p>About the upstream Parrot project:</p>\n<h1>Hi, I'm Uygar 👋</h1>")
+        parser = HelpText(replace_text=False)
+        parser.feed(original)
+        output = ''.join(parser.parts)
+    else:
+        if path.name == 'privacy.html':
+            start = original.index('  <li><strong>Update check:</strong>')
+            end = original.index('</li>', start) + len('</li>')
+            original = original[:start] + '  <li><strong>Updates:</strong> Automatic update checks are disabled in this build.</li>' + original[end:]
+        elif path.name == 'settings.html':
+            start = original.index('Updates take care of themselves:')
+            end = original.index('There\'s also an "Open User', start)
+            original = original[:start] + 'Automatic updates are disabled in this build. ' + original[end:]
+            original = original.replace('(that\'s me saying\n<a href="hi.html">hi</a>)', '(<a href="hi.html">about upstream Parrot</a>)')
+        elif path.name == 'getting-started.html':
+            start = original.index('<p>Grab the latest DMG')
+            end = original.index('</p>', start) + len('</p>')
+            original = original[:start] + '<p>For source and installation information, visit the <a href="https://github.com/juslintek/Sakviro">Sakviro repository</a>.</p>' + original[end:]
+        elif path.name == 'index.html':
+            original = original.replace('alt="Parrot\'s meeting list with waveforms"', 'alt="Meeting list with waveforms"')
+            original = original.replace('Parrot is free and open source.\n<a href="https://github.com/turantekin/Parrot">', 'Sakviro is based on the open-source Parrot project.\n<a href="https://github.com/turantekin/Parrot">')
+        parser = HelpText()
+        parser.feed(original)
+        output = ''.join(parser.parts).replace('<em>Sakviro</em> list in Reminders', '<em>Parrot</em> list in Reminders')
+        output = output.replace('Sakviro is based on the open-source Sakviro project.', 'Sakviro is based on the open-source Parrot project.')
+        output = output.replace('about upstream Sakviro', 'about upstream Parrot')
+        output = output.replace('Hi from Uygar', 'About upstream Parrot')
+        output = output.replace('href="https://github.com/turantekin/Parrot/releases">releases page', 'href="https://github.com/turantekin/Parrot/releases">upstream Parrot releases page')
+    if '<img ' in output:
+        output = output.replace('<img ', '<p>Screenshots show the upstream Parrot app and may differ from Sakviro.</p>\n<img ', 1)
+    path.write_text(output)
+PYHELP
+fi
+
 # The book's own identity. HPDBookAccessPath is the landing page; the index
 # file is what gives the Help menu's search field results from our pages.
 cat > "$BOOK/Contents/Info.plist" <<'PLIST'
@@ -50,6 +142,11 @@ cat > "$BOOK/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")
+/usr/libexec/PlistBuddy -c "Set :CFBundleHelpBookName $BUNDLE_ID.help" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID.help" "$BOOK/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $DISPLAY_NAME Help" "$BOOK/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :HPDBookTitle $DISPLAY_NAME Help" "$BOOK/Contents/Info.plist"
 
 # Build the search indexes Help Viewer queries. Two formats: the default
 # typedstream .helpindex for older viewers, and the Core Spotlight index

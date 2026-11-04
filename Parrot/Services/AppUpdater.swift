@@ -5,9 +5,9 @@ import UserNotifications
 
 /// The words and the one decision behind "an update is waiting".
 enum UpdateNotice {
-    static func title(version: String) -> String { "Parrot \(version) is perched and ready" }
-    static let body = "It moves in next time you quit Parrot. Or right now, if you can't wait."
-    static let busyBody = "Finish your call first. Parrot will be right here."
+    static func title(version: String) -> String { "\(MeetingActions.appName) \(version) is perched and ready" }
+    static let body = "It moves in next time you quit \(MeetingActions.appName). Or right now, if you can't wait."
+    static let busyBody = "Finish your call first. \(MeetingActions.appName) will be right here."
 
     enum Action: Equatable { case post, hold, skip }
 

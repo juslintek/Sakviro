@@ -37,7 +37,7 @@ extension RecordingManager {
         guard meeting.status == .done, !meeting.segments.isEmpty else {
             throw rewriteFailure("This meeting has no transcript to rewrite from.")
         }
-        guard !isRecording else { throw rewriteFailure("Parrot is recording. Rewrite the report after the call.") }
+        guard !isRecording else { throw rewriteFailure("\(MeetingActions.appName) is recording. Rewrite the report after the call.") }
         guard callAnalysisEngine.provider.isConfigured else {
             throw rewriteFailure("Set up the Assistant's AI in Settings first.")
         }

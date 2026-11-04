@@ -39,9 +39,9 @@ struct PermissionsStep: View {
 
     private var systemAudioPendingHint: String {
         if #available(macOS 15.0, *) {
-            return "Clicked Allow on the macOS prompt? You're set — this row turns green the first time Parrot hears meeting audio. No restart needed."
+            return "Clicked Allow on the macOS prompt? You're set — this row turns green the first time \(MeetingActions.appName) hears meeting audio. No restart needed."
         }
-        return "Already flipped the switch? macOS applies Screen Recording when Parrot restarts — quit and reopen Parrot, and this page will pick up right here."
+        return "Already flipped the switch? macOS applies Screen Recording when \(MeetingActions.appName) restarts — quit and reopen \(MeetingActions.appName), and this page will pick up right here."
     }
 
     var body: some View {
@@ -51,7 +51,7 @@ struct PermissionsStep: View {
             Text("Start with permissions")
                 .font(Theme.Typography.title())
 
-            Text("Parrot needs two macOS permissions to hear your calls. Optional video recording asks you to choose a window or display when a call starts.")
+            Text("\(MeetingActions.appName) needs two macOS permissions to hear your calls. Optional video recording asks you to choose a window or display when a call starts.")
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.ink2)
                 .multilineTextAlignment(.center)
@@ -61,8 +61,8 @@ struct PermissionsStep: View {
             VStack(alignment: .leading, spacing: 10) {
                 PermissionRow(
                     icon: "mic",
-                    askTitle: "Help Parrot hear you",
-                    grantedTitle: "Parrot can hear you",
+                    askTitle: "Help \(MeetingActions.appName) hear you",
+                    grantedTitle: "\(MeetingActions.appName) can hear you",
                     subtitle: "Microphone, your side of the call",
                     isGranted: micGranted,
                     action: {
@@ -74,8 +74,8 @@ struct PermissionsStep: View {
 
                 PermissionRow(
                     icon: "speaker.wave.2",
-                    askTitle: "Help Parrot hear your meeting",
-                    grantedTitle: "Parrot can hear your meeting",
+                    askTitle: "Help \(MeetingActions.appName) hear your meeting",
+                    grantedTitle: "\(MeetingActions.appName) can hear your meeting",
                     subtitle: systemAudioSubtitle,
                     isGranted: screenGranted,
                     action: {

@@ -223,7 +223,7 @@ struct SettingsView: View {
                 LoginItemRow(first: true)
                 SettingsToggleRow(
                     title: "Hide from the Dock when the window is closed",
-                    detail: "Parrot stays in the menu bar. Choose Open Parrot there, and the Dock icon is back while the window is open.",
+                    detail: "\(MeetingActions.appName) stays in the menu bar. Choose Open \(MeetingActions.appName) there, and the Dock icon is back while the window is open.",
                     isOn: $hideDock
                 )
             }
@@ -263,14 +263,14 @@ struct SettingsView: View {
 
             SettingsCard(title: "About") {
                 SettingsLabeledRow(title: "Version", first: true) {
-                    Text("Parrot \(AppUpdater.currentVersion)")
+                    Text("\(MeetingActions.appName) \(AppUpdater.currentVersion)")
                         .font(Theme.Typography.secondary)
                         .foregroundStyle(Theme.Colors.ink2)
                 }
                 #if !PARROT_NO_UPDATER
                 if AppUpdater.shared.isAvailable {
                     SettingsToggleRow(
-                        title: "Keep Parrot up to date",
+                        title: "Keep \(MeetingActions.appName) up to date",
                         detail: "Downloads new versions in the background and installs them when you quit. Never during a recording.",
                         isOn: $automaticUpdates
                     )
@@ -296,8 +296,10 @@ struct SettingsView: View {
                         if !isEmbedded { NSApp.keyWindow?.performClose(nil) }
                     }
                 }
-                SettingsLabeledRow(title: "Website", detail: "The landing page, with a demo you can scroll and the honest privacy list.") {
-                    Button("Open openparrot.app") { MeetingActions.open(MeetingActions.websiteURL) }
+                if !MeetingActions.isFork {
+                    SettingsLabeledRow(title: "Website", detail: "The landing page, with a demo you can scroll and the honest privacy list.") {
+                        Button("Open openparrot.app") { MeetingActions.open(MeetingActions.websiteURL) }
+                    }
                 }
             }
         }
@@ -338,7 +340,7 @@ struct SettingsView: View {
             SettingsCard(title: "Bookmarks") {
                 SettingsToggleRow(
                     title: "Mark moments from any app with \(GlobalHotKey.Combo.markMoment.display)",
-                    detail: "While a call records, \(GlobalHotKey.Combo.markMoment.display) marks the moment even when Zoom or your browser is in front. Parrot only hears that one shortcut, never other keys, and only during a recording.",
+                    detail: "While a call records, \(GlobalHotKey.Combo.markMoment.display) marks the moment even when Zoom or your browser is in front. \(MeetingActions.appName) only hears that one shortcut, never other keys, and only during a recording.",
                     first: true,
                     isOn: $globalMarkHotKey
                 )
@@ -497,7 +499,7 @@ struct SettingsView: View {
             SettingsCard(title: "Language") {
                 SettingsLabeledRow(
                     title: "Language",
-                    detail: "Set this to the language your calls are in. Parrot warns you during a call if it hears a different one.",
+                    detail: "Set this to the language your calls are in. \(MeetingActions.appName) warns you during a call if it hears a different one.",
                     first: true
                 ) {
                     Picker("", selection: $transcriptionLanguage) {
@@ -678,7 +680,7 @@ struct SettingsView: View {
                 }
 
                 SettingsLabeledRow(
-                    title: "Ask Parrot",
+                    title: "Ask \(MeetingActions.appName)",
                     detail: "Answers questions about your past calls. Pick Ollama to keep them free and on this Mac. If this one isn't set up, Ask uses the reports AI."
                 ) {
                     Picker("", selection: $askProvider) {
@@ -870,8 +872,8 @@ private struct HelpCircleButton: View {
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.12), value: hovering)
         .onHover { hovering = $0 }
-        .help("Parrot Help")
-        .accessibilityLabel("Parrot Help")
+        .help("\(MeetingActions.appName) Help")
+        .accessibilityLabel("\(MeetingActions.appName) Help")
     }
 }
 

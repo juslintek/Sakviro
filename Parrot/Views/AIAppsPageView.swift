@@ -104,9 +104,9 @@ enum AIApps {
     static func question(_ q: Question, title: String, date: Date) -> String {
         let meeting = "my meeting \"\(title)\" on \(date.formatted(date: .abbreviated, time: .shortened))"
         switch q {
-        case .followUp: return "Use Parrot to draft a follow-up email for \(meeting)."
-        case .secondOpinion: return "Use Parrot to read \(meeting) and give me a second opinion: what went well, what I missed, what to do next."
-        case .agreed: return "Use Parrot: what did we agree in \(meeting), and who owes what?"
+        case .followUp: return "Use \(MeetingActions.appName) to draft a follow-up email for \(meeting)."
+        case .secondOpinion: return "Use \(MeetingActions.appName) to read \(meeting) and give me a second opinion: what went well, what I missed, what to do next."
+        case .agreed: return "Use \(MeetingActions.appName): what did we agree in \(meeting), and who owes what?"
         }
     }
 
@@ -115,8 +115,8 @@ enum AIApps {
     /// What to do after Copy Command. People pasted it into the AI app's chat
     /// (where it fails, or asks for permission) instead of Terminal.
     static func pasteSteps(_ app: CommandApp) -> [String] {
-        let last = app == .codex ? "Quit and reopen the ChatGPT app. Parrot is now in Codex."
-                                 : "Start a new Claude Code session. Parrot is now in every project."
+        let last = app == .codex ? "Quit and reopen the ChatGPT app. \(MeetingActions.appName) is now in Codex."
+                                 : "Start a new Claude Code session. \(MeetingActions.appName) is now in every project."
         return ["Click Open Terminal (it's the Terminal app, not a chat window).",
                 "Paste with ⌘V and press Return.", last]
     }
@@ -180,7 +180,7 @@ struct AIAppsPageView: View {
                     .font(Theme.Typography.lede)
                     .foregroundStyle(Theme.Colors.ink2)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Ask Parrot runs on your Mac and stays private. Claude is a bigger brain for bigger jobs (writing, many calls at once), using your Claude plan.")
+                Text("Ask \(MeetingActions.appName) runs on your Mac and stays private. Claude is a bigger brain for bigger jobs (writing, many calls at once), using your Claude plan.")
                     .font(Theme.Typography.secondary)
                     .foregroundStyle(Theme.Colors.ink3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -189,7 +189,7 @@ struct AIAppsPageView: View {
             SettingsCard(title: "Connection") {
                 SettingsToggleRow(title: "Allow AI apps to read my meetings", first: true, isOn: $enabled)
                 SettingsToggleRow(title: "Let AI apps suggest profiles",
-                                  detail: "Claude, Cursor or Codex can send a suggested profile. You review every change in Parrot first.",
+                                  detail: "Claude, Cursor or Codex can send a suggested profile. You review every change in \(MeetingActions.appName) first.",
                                   isOn: $suggestions)
                     .disabled(!enabled)
                 SettingsRow {

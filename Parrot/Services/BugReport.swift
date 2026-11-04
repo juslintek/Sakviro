@@ -37,7 +37,7 @@ enum BugReport {
         var placeholder: String {
             switch self {
             case .bug: "What did you do, what happened, and what did you expect instead?"
-            case .idea: "What would you like Parrot to do?"
+            case .idea: "What would you like \(MeetingActions.appName) to do?"
             }
         }
     }
@@ -59,7 +59,7 @@ enum BugReport {
         let cpu = "Intel"
         #endif
         return [
-            "Parrot \(AppUpdater.currentVersion) · macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · \(cpu)",
+            "\(MeetingActions.appName) \(AppUpdater.currentVersion) · macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · \(cpu)",
             "Model: \(defaults.string(forKey: "whisperModel") ?? "base") · Transcription: \(backend) · Assistant: \(copilot)",
         ]
     }

@@ -39,7 +39,7 @@ struct AIAppsStep: View {
                 Image(systemName: "info.circle")
                     .foregroundStyle(Theme.Colors.ink2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Not private like the rest of Parrot")
+                    Text("Not private like the rest of \(MeetingActions.appName)")
                         .font(Theme.Typography.cardTitle)
                     Text("When you ask, what the app reads goes to its company (Anthropic, OpenAI or Cursor's AI provider) under your account. It stays off until you connect, and never sees audio, API keys or on-device-only meetings.")
                         .font(Theme.Typography.secondary)

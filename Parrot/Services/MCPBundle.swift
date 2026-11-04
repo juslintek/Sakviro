@@ -8,6 +8,7 @@ import Foundation
 enum MCPBundle {
 
     static let bundleID = "com.uygar.parrot"
+    static let appBundleID = "com.linas.parrot.assistant"
     static let claudeBundleID = "com.anthropic.claudefordesktop"
     static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
     /// Codex now ships inside the ChatGPT app, which carries this id.
@@ -56,6 +57,30 @@ enum MCPBundle {
     /// usual places, then wherever Spotlight finds it by its app id, so a
     /// moved app still connects. `appPath` nil for the release file.
     static func launcher(appPath: String?) -> String {
+        if MeetingActions.isFork {
+            let places = ([appPath].compactMap { $0 } + ["/Applications/Sakviro.app"]).map(shellQuoted)
+                + ["\"$HOME/Applications/Sakviro.app\""]
+            return """
+            #!/bin/sh
+            try_app() {
+              app=$1
+              [ -x "$app/Contents/MacOS/Parrot" ] || return 1
+              [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)" = \(shellQuoted(appBundleID)) ] || return 1
+              exec "$app/Contents/MacOS/Parrot" --mcp 3<&-
+            }
+            for app in \(places.joined(separator: " ")); do
+              try_app "$app"
+            done
+            while IFS= read -r app <&3; do
+              try_app "$app"
+            done 3<<EOF
+            $(mdfind \(shellQuoted("kMDItemCFBundleIdentifier == '\(appBundleID)'")) 2>/dev/null)
+            EOF
+            echo "Sakviro isn't installed. Get it at https://github.com/juslintek/Sakviro" >&2
+            exit 1
+
+            """
+        }
         let places = ([appPath].compactMap { $0 } + ["/Applications/Parrot.app"]).map(shellQuoted)
             + ["\"$HOME/Applications/Parrot.app\""]
         return """
@@ -75,11 +100,11 @@ enum MCPBundle {
         [
             "manifest_version": "0.3",
             "name": "parrot",
-            "display_name": "Parrot",
+            "display_name": MeetingActions.appName,
             "version": version,
             "description": "Your recorded meetings in Claude: search them, catch up, list promises, draft follow-ups. Local and read-only.",
             "long_description": """
-            Parrot records your calls on your Mac and writes the transcript with real speaker names. \
+            \(MeetingActions.appName) records your calls on your Mac and writes the transcript with real speaker names. \
             This connects Claude to those meetings, read-only.
 
             - **Find anything:** "When did Sarah mention the budget?"
@@ -89,19 +114,19 @@ enum MCPBundle {
             - **Second opinion:** "Coach me across my last 10 calls"
             - **Prepare:** "Brief me for my call with Acme"
 
-            Claude can't change, delete or record anything. You choose what it sees in Parrot, and \
+            Claude can't change, delete or record anything. You choose what it sees in \(MeetingActions.appName), and \
             meetings marked on-device only are never shown. When Claude reads a meeting, that text \
             goes to Anthropic under your Claude account.
             """,
-            "author": ["name": "Parrot", "url": "https://openparrot.app"],
-            "homepage": "https://openparrot.app",
-            "documentation": "https://openparrot.app/help/connections.html",
-            "support": "https://github.com/turantekin/Parrot/issues",
-            "repository": ["type": "git", "url": "https://github.com/turantekin/Parrot"],
+            "author": ["name": MeetingActions.appName, "url": MeetingActions.websiteURL],
+            "homepage": MeetingActions.websiteURL,
+            "documentation": MeetingActions.isFork ? "https://github.com/juslintek/Sakviro" : "https://openparrot.app/help/connections.html",
+            "support": "\(MeetingActions.repoURL)/issues",
+            "repository": ["type": "git", "url": MeetingActions.repoURL],
             "license": "GPL-3.0",
             "icon": "icon.png",
             "keywords": ["meetings", "transcripts", "calls", "notes", "local", "mac"],
-            "privacy_policies": ["https://openparrot.app/privacy"],
+            "privacy_policies": MeetingActions.isFork ? [] : ["https://openparrot.app/privacy"],
             "compatibility": ["platforms": ["darwin"]],
             "server": [
                 "type": "binary",
@@ -134,7 +159,7 @@ enum MCPBundle {
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         if let png = icon.flatMap(pngData) { try png.write(to: root.appendingPathComponent("icon.png")) }
 
-        let out = fm.temporaryDirectory.appendingPathComponent("Parrot.mcpb")
+        let out = fm.temporaryDirectory.appendingPathComponent("\(MeetingActions.appName).mcpb")
         try? fm.removeItem(at: out)
         // The manifest must sit at the zip's root: no parent folder, no resource forks.
         let zip = Process()

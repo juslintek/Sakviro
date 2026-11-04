@@ -70,7 +70,7 @@ final class SystemAudioTap {
             excluded = [own]
         }
         let description = CATapDescription(monoGlobalTapButExcludeProcesses: excluded)
-        description.name = "Parrot System Audio"
+        description.name = "\(MeetingActions.appName) System Audio"
         description.isPrivate = true
         description.muteBehavior = .unmuted  // the user must keep hearing their call
 
@@ -96,7 +96,7 @@ final class SystemAudioTap {
             // lags that app's output by 20-100 ms. Without it the tap delivers
             // (silent) buffers from the first instant, ~50 ms after start.
             let aggregateDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "Parrot System Audio",
+                kAudioAggregateDeviceNameKey: "\(MeetingActions.appName) System Audio",
                 kAudioAggregateDeviceUIDKey: UUID().uuidString,
                 kAudioAggregateDeviceIsPrivateKey: true,
                 kAudioAggregateDeviceTapAutoStartKey: false,
@@ -173,7 +173,7 @@ final class SystemAudioTap {
     /// be read back.
     static func fireAuthorizationPrompt() {
         let description = CATapDescription(monoGlobalTapButExcludeProcesses: [])
-        description.name = "Parrot System Audio"
+        description.name = "\(MeetingActions.appName) System Audio"
         description.isPrivate = true
         var probeTapID = AudioObjectID(kAudioObjectUnknown)
         if AudioHardwareCreateProcessTap(description, &probeTapID) == noErr,

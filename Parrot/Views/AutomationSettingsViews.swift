@@ -12,7 +12,7 @@ struct LoginItemRow: View {
 
     var body: some View {
         SettingsToggleRow(
-            title: "Open Parrot at login",
+            title: "Open \(MeetingActions.appName) at login",
             detail: "Starts quietly when you log in, so it can offer to record your first call of the day. Listed in System Settings → General → Login Items.",
             first: first,
             isOn: Binding(
@@ -31,11 +31,11 @@ struct LoginItemRow: View {
         }
 
         if state == .needsApproval {
-            SettingsLabeledRow(title: "Needs your OK", detail: "macOS wants you to allow Parrot in Login Items.") {
+            SettingsLabeledRow(title: "Needs your OK", detail: "macOS wants you to allow \(MeetingActions.appName) in Login Items.") {
                 Button("Open Login Items") { LoginItem.openSystemSettings() }
             }
         } else if state == .unavailable {
-            SettingsRow { Hint("Available once Parrot runs from the Applications folder.") }
+            SettingsRow { Hint("Available once \(MeetingActions.appName) runs from the Applications folder.") }
         } else if let error {
             SettingsRow { Hint("Couldn't change it: \(error)") }
         }
@@ -52,7 +52,7 @@ struct CallDetectionCard: View {
 
     var body: some View {
         SettingsCard(title: "Call Detection",
-                     blurb: "When Zoom, Meet, Teams or any app starts using your microphone, Parrot notices the call. It only sees that the mic is in use, never the audio.") {
+                     blurb: "When Zoom, Meet, Teams or any app starts using your microphone, \(MeetingActions.appName) notices the call. It only sees that the mic is in use, never the audio.") {
             SettingsBlockRow(title: "When a call starts", first: true) {
                 Picker("", selection: $modeRaw) {
                     ForEach(AutoRecordMode.allCases) { mode in
@@ -69,7 +69,7 @@ struct CallDetectionCard: View {
             if NotificationAccess.needsWarning(notifications, mode: AutoRecordMode(rawValue: modeRaw) ?? .ask,
                                                reminders: reminders) {
                 SettingsLabeledRow(title: "Notifications are off",
-                                   detail: "Parrot can't ask to record a call or remind you of a meeting. It only bounces its Dock icon.") {
+                                   detail: "\(MeetingActions.appName) can't ask to record a call or remind you of a meeting. It only bounces its Dock icon.") {
                     Button(notifications == .notAsked ? "Turn On" : "Open Settings") {
                         Task { notifications = await NotificationAccess.turnOn() }
                     }
@@ -105,11 +105,11 @@ struct CallDetectionCard: View {
     private var detail: String {
         switch AutoRecordMode(rawValue: modeRaw) ?? .ask {
         case .off:
-            return "Parrot won't watch for calls. Start recordings yourself."
+            return "\(MeetingActions.appName) won't watch for calls. Start recordings yourself."
         case .ask:
             return "A notification asks whether to record, and offers to stop when the call ends. Nothing records until you say so."
         case .auto:
-            return "Parrot starts recording by itself and stops when the call ends. Recording laws differ by place; many require telling everyone on the call. That's on you in this mode."
+            return "\(MeetingActions.appName) starts recording by itself and stops when the call ends. Recording laws differ by place; many require telling everyone on the call. That's on you in this mode."
         }
     }
 }
@@ -182,7 +182,7 @@ struct CalendarCard: View {
                 )
                 if !choices.isEmpty {
                     SettingsBlockRow(
-                        title: "Calendars Parrot reads",
+                        title: "Calendars \(MeetingActions.appName) reads",
                         detail: "Untick a calendar to leave its events out, like a shared team calendar or events found in Mail. Invites you haven't answered are always left out."
                     ) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -231,7 +231,7 @@ struct CalendarCard: View {
     private var statusDetail: String {
         if calendar.isConnected { return "Meetings take their event's name and guest list." }
         if calendar.access == .denied {
-            return "Allow Parrot under Privacy & Security → Calendars, then come back."
+            return "Allow \(MeetingActions.appName) under Privacy & Security → Calendars, then come back."
         }
         return "macOS will ask once for permission to read your calendars."
     }
@@ -294,8 +294,8 @@ struct CallPromptBanner: View {
 
     private var subtitle: String {
         switch prompt.kind {
-        case .start: return prompt.eventTitle.map { "Record “\($0)”?" } ?? "Record it with Parrot?"
-        case .stop: return "Parrot is still recording."
+        case .start: return prompt.eventTitle.map { "Record “\($0)”?" } ?? "Record it with \(MeetingActions.appName)?"
+        case .stop: return "\(MeetingActions.appName) is still recording."
         }
     }
 }

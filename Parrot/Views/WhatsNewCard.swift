@@ -10,7 +10,7 @@ struct WhatsNewCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            CopilotHeroCard(title: news.headline, subtitle: "Here's what changed since you last looked.",
+            CopilotHeroCard(title: news.headline.replacingOccurrences(of: "Parrot", with: MeetingActions.appName), subtitle: "Here's what changed since you last looked.",
                             bordered: false) { EmptyView() }
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(news.highlights, id: \.self) { line in
@@ -26,7 +26,7 @@ struct WhatsNewCard: View {
                 }
             }
             HStack(spacing: Theme.Metrics.controlGap) {
-                Button("Read the full story") {
+                Button(MeetingActions.isFork ? "Read upstream release notes" : "Read the full story") {
                     openURL(news.changelogURL)
                     onClose()
                 }

@@ -51,7 +51,7 @@ struct ConnectionsSettingsPage: View {
             }
 
             SettingsCard(title: "Webhook",
-                         blurb: "After each call Parrot posts the meeting as JSON to this address. Paste a Zapier, Make or n8n webhook to reach Slack, Notion or your CRM. On-device-only meetings are never sent.") {
+                         blurb: "After each call \(MeetingActions.appName) posts the meeting as JSON to this address. Paste a Zapier, Make or n8n webhook to reach Slack, Notion or your CRM. On-device-only meetings are never sent.") {
                 SettingsBlockRow(title: "Address (https)", first: true) {
                     TextField("https://hooks.zapier.com/…", text: $webhookURL)
                         .textFieldStyle(.roundedBorder)
@@ -67,7 +67,7 @@ struct ConnectionsSettingsPage: View {
                 SettingsLabeledRow(title: "Signing secret (optional)",
                                    detail: secretSaved
                                        ? "Saved in your Keychain. Requests carry X-Parrot-Signature: sha256=HMAC of the body."
-                                       : "Lets the receiver check a request really came from your Parrot.") {
+                                       : "Lets the receiver check a request really came from your \(MeetingActions.appName).") {
                     HStack(spacing: 6) {
                         SecureField("secret", text: $secretDraft)
                             .textFieldStyle(.roundedBorder)
@@ -151,7 +151,7 @@ struct PrivacySettingsPage: View {
             }
 
             SettingsCard(title: "Hide Personal Details from Cloud AI",
-                         blurb: "Before anything goes to Claude or a custom server, Parrot swaps emails, phone numbers, card numbers and IBANs for placeholders like [EMAIL_1], then puts the real values back in what comes back. Local Ollama gets the text as is.") {
+                         blurb: "Before anything goes to Claude or a custom server, \(MeetingActions.appName) swaps emails, phone numbers, card numbers and IBANs for placeholders like [EMAIL_1], then puts the real values back in what comes back. Local Ollama gets the text as is.") {
                 SettingsToggleRow(title: "Hide emails, phone, card and bank numbers", first: true, isOn: $redact)
                 SettingsToggleRow(title: "Hide people's names too",
                                   detail: "Uses Apple's on-device name detection. It can miss names or catch a product name, and the AI's answers get vaguer.",
@@ -172,7 +172,7 @@ struct PrivacySettingsPage: View {
             }
 
             SettingsCard(title: "Automatic Clean-up",
-                         blurb: "Delete old recordings on a schedule. Checked when Parrot opens and every hour.") {
+                         blurb: "Delete old recordings on a schedule. Checked when \(MeetingActions.appName) opens and every hour.") {
                 SettingsLabeledRow(title: "Delete call audio",
                                    detail: "Transcript, report and notes stay.", first: true) {
                     Picker("", selection: $audioDays) {

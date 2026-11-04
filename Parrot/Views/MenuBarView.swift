@@ -75,14 +75,14 @@ struct MenuBarView: View {
             Divider()
 
             lastCall
-            Button("Ask Parrot…") {
+            Button("Ask \(MeetingActions.appName)…") {
                 showMainWindow { appSession.askRequest = AppSession.AskRequest(scope: nil, scopeTitle: nil) }
             }
             .keyboardShortcut("k")
-            if followClicked {
+            if !MeetingActions.isFork && followClicked {
                 Button("Say Hi to Us on X 👋") { MeetingActions.open(MeetingActions.xSayHiURL) }
-            } else {
-                Button("Parrot Needs Friends on X 🥺") {
+            } else if !MeetingActions.isFork {
+                Button("\(MeetingActions.appName) Needs Friends on X 🥺") {
                     followClicked = true
                     MeetingActions.open(MeetingActions.xFollowURL)
                 }
@@ -91,8 +91,8 @@ struct MenuBarView: View {
 
         Divider()
 
-        Button("Open Parrot") { showMainWindow() }
-        Button("Quit Parrot") { NSApplication.shared.terminate(nil) }
+        Button("Open \(MeetingActions.appName)") { showMainWindow() }
+        Button("Quit \(MeetingActions.appName)") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 
@@ -208,7 +208,7 @@ struct MenuBarLabel: View {
         let time = recordingManager.isRecording ? recordingManager.formattedElapsedTime : nil
         let muted = recordingManager.isRecording && recordingManager.isMuted
         Image(nsImage: Self.render(time: time, muted: muted))
-            .accessibilityLabel(time.map { "Parrot, recording \($0)\(muted ? ", muted" : "")" } ?? "Parrot")
+            .accessibilityLabel(time.map { "\(MeetingActions.appName), recording \($0)\(muted ? ", muted" : "")" } ?? MeetingActions.appName)
     }
 
     static func render(time: String?, muted: Bool) -> NSImage {

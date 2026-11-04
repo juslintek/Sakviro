@@ -68,7 +68,7 @@ private struct OllamaSetupRows: View {
                 done("Ollama is running")
             } else if installed {
                 PermissionRow(icon: "play.fill", askTitle: "Open Ollama", grantedTitle: "",
-                              subtitle: "Installed. Open it once so Parrot can find it.") {
+                              subtitle: "Installed. Open it once so \(MeetingActions.appName) can find it.") {
                     Task { await installer.openInstalled() }
                 }
             } else {

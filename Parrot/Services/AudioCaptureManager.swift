@@ -967,8 +967,8 @@ enum CaptureError: LocalizedError {
         switch self {
         case .noDisplay: "No display found for audio capture"
         case .noMicrophone: "No microphone available"
-        case .screenRecordingDenied: "Screen Recording permission is required. Please grant it in System Settings > Privacy & Security > Screen & System Audio Recording, then restart Parrot."
-        case .systemAudioUnavailable: "System audio capture could not start. Allow Parrot in System Settings > Privacy & Security > Screen & System Audio Recording, then try again."
+        case .screenRecordingDenied: "Screen Recording permission is required. Please grant it in System Settings > Privacy & Security > Screen & System Audio Recording, then restart \(MeetingActions.appName)."
+        case .systemAudioUnavailable: "System audio capture could not start. Allow \(MeetingActions.appName) in System Settings > Privacy & Security > Screen & System Audio Recording, then try again."
         }
     }
 }

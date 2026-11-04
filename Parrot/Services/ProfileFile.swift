@@ -105,7 +105,7 @@ struct ProfileFile: Codable {
             privacy: Privacy(recommendOnDeviceOnly: p.onDeviceOnly),
             meta: Meta(source: source ?? (pristine ? "builtin" : "user"),
                        basedOn: p.isBuiltIn && !pristine ? BasedOn(sharedID: p.id, version: p.presetVersion) : nil,
-                       createdWith: "Parrot \(AppUpdater.currentVersion)"))
+                       createdWith: "\(MeetingActions.appName) \(AppUpdater.currentVersion)"))
         return file.data()
     }
 
@@ -164,10 +164,10 @@ struct ProfileFile: Codable {
     static func decode(_ data: Data) throws -> ProfileFile {
         guard data.count <= maxBytes else { throw Refused(reason: "The file is bigger than 64 KB.") }
         guard var file = try? JSONDecoder().decode(ProfileFile.self, from: data) else {
-            throw Refused(reason: "This isn't a Parrot profile, or it's damaged.")
+            throw Refused(reason: "This isn't a \(MeetingActions.appName) profile, or it's damaged.")
         }
-        guard file.format == formatName else { throw Refused(reason: "This isn't a Parrot profile.") }
-        guard file.formatVersion <= formatVersion else { throw Refused(reason: "This profile needs a newer Parrot.") }
+        guard file.format == formatName else { throw Refused(reason: "This isn't a \(MeetingActions.appName) profile.") }
+        guard file.formatVersion <= formatVersion else { throw Refused(reason: "This profile needs a newer \(MeetingActions.appName).") }
         try file.checkLimits()
         file.profile.icon = symbol(file.profile.icon, or: defaultProfileIcon)
         for i in file.profile.kinds.indices {
