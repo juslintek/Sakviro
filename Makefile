@@ -12,8 +12,8 @@ APP         := $(DIST)/Parrot.app
 PLIST       := $(APP)/Contents/Info.plist
 BINDIR      := .build/$(CONFIG)
 VERSION     ?= 0.0.0-dev
-BUNDLE_ID   ?= com.uygar.parrot
-DISPLAY_NAME ?= Parrot
+BUNDLE_ID   ?= com.linas.parrot.assistant
+DISPLAY_NAME ?= Sakviro
 NO_UPDATER := $(if $(filter com.uygar.parrot,$(BUNDLE_ID)),0,1)
 BUILD_NUM   := $(shell date +%Y%m%d%H%M)
 
@@ -117,6 +117,7 @@ bundle: build
 	@plutil -replace CFBundleIdentifier         -string $(BUNDLE_ID) $(PLIST)
 	@plutil -replace CFBundleName               -string "$(DISPLAY_NAME)" $(PLIST)
 	@plutil -insert CFBundleDisplayName          -string "$(DISPLAY_NAME)" $(PLIST)
+	@python3 scripts/display-name-plist.py "$(PLIST)" "$(DISPLAY_NAME)"
 	@plutil -replace CFBundleDevelopmentRegion  -string en               $(PLIST)
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)"     $(PLIST)
 	@plutil -replace CFBundleVersion            -string "$(BUILD_NUM)"   $(PLIST)
@@ -251,9 +252,9 @@ run: bundle
 
 .PHONY: install
 install: bundle
-	rm -rf /Applications/Parrot.app
-	cp -R $(APP) /Applications/
-	@echo "Installed /Applications/Parrot.app — start it from Spotlight or 'open -a Parrot'"
+	@test ! -e "/Applications/$(DISPLAY_NAME).app" -a ! -L "/Applications/$(DISPLAY_NAME).app" || { echo "App already exists: /Applications/$(DISPLAY_NAME).app"; exit 1; }
+	ditto "$(APP)" "/Applications/$(DISPLAY_NAME).app"
+	@echo "Installed /Applications/$(DISPLAY_NAME).app"
 
 # ParrotApp.swift exposes CLI harness flags; --profile-test is the ~60-check
 # logic harness that runs headless.

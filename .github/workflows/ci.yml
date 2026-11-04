@@ -7,7 +7,6 @@ name: CI
 on:
   push:
     branches: ["**"]
-    paths-ignore: ["docs/**", "*.md"]
   pull_request:
   workflow_dispatch:
 
@@ -22,12 +21,15 @@ jobs:
   build-and-test:
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      BUNDLE_ID: com.linas.parrot.assistant
+      DISPLAY_NAME: Sakviro
+      PARROT_NO_UPDATER: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Toolchain
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
           xcodebuild -version
           swift --version
 
@@ -75,6 +77,13 @@ jobs:
           tail -1 harness.log
           exit $status
 
+      - name: Video mux and screen sampler
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then brew install ffmpeg; fi
+          tests/video-mux/check.sh
+          swiftc -parse-as-library Parrot/Services/ScreenContext.swift Parrot/Services/VideoCaptureService.swift tests/ScreenSamplerCheck.swift -o /tmp/screen-sampler-check
+          /tmp/screen-sampler-check
+
       - name: Snapshot renders
         run: |
           mkdir -p snapshots
@@ -107,15 +116,18 @@ jobs:
       - name: Test build (release, ad-hoc)
         if: github.event_name != 'pull_request'
         run: |
-          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.21.0-test
-          ditto -c -k --keepParent dist/Parrot.app Parrot-test.zip
+          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.29.9-sakviro1-ci
+          ditto dist/Parrot.app "$RUNNER_TEMP/Sakviro.app"
+          ditto -c -k --keepParent "$RUNNER_TEMP/Sakviro.app" Sakviro-test.zip
+          test -s Sakviro-test.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: Parrot-test-build
-          path: Parrot-test.zip
+          name: Sakviro-test-build
+          path: Sakviro-test.zip
+          if-no-files-found: error
           retention-days: 30
 
       - name: Upload snapshots
