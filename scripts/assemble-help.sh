@@ -71,6 +71,11 @@ class HelpText(HTMLParser):
     def handle_decl(self, value): self.parts.append(f'<!{value}>')
     def handle_pi(self, value): self.parts.append(f'<?{value}>')
 
+def replace_once(text, old, new):
+    if text.count(old) != 1:
+        raise ValueError(f'Expected one occurrence: {old[:80]}')
+    return text.replace(old, new, 1)
+
 for path in Path(sys.argv[1]).glob('*.html'):
     original = path.read_text()
     if path.name == 'hi.html':
@@ -80,6 +85,26 @@ for path in Path(sys.argv[1]).glob('*.html'):
         output = ''.join(parser.parts)
     else:
         if path.name == 'privacy.html':
+            original = replace_once(original, '''  <li>Audio recordings. They are written to your disk and never uploaded
+  anywhere by anything, ever. No exceptions, no telemetry, no accounts.</li>''', '''  <li>Saved audio recordings stay on your disk. If you enable cloud transcription
+  or cloud polish, audio is sent to the selected transcription service.</li>''')
+            original = replace_once(original, '''  Audio never goes.</li>
+  <li><strong>Instant document answers''', '''  These analysis requests can also include selected-window frames if you enable
+  screen analysis for the session. They do not send audio.</li>
+  <li><strong>CLI accounts:</strong> if you choose a CLI provider, meeting text and
+  relevant context go to that CLI account's service.</li>
+  <li><strong>Screen analysis:</strong> when you opt in for a session, sampled
+  frames from the window you select may go to your chosen AI provider. This
+  sends selected frames, not a whole video recording.</li>
+  <li><strong>Instant document answers''')
+            original = replace_once(original, '''  is sent to them for speech-to-text as it happens. This is the one opt-in
+  that sends sound. On-device stays the default.</li>''', '''  is sent to the chosen service for speech-to-text. Cloud polish sends audio
+  to Groq after the call. On-device transcription stays the default, and
+  on-device-only mode blocks these cloud paths.</li>''')
+            original = replace_once(original, '''local: Parrot only ever talks to it on localhost. Local model, local
+transcription, zero outbound bytes. That combination is the whole reason
+Parrot exists.''', '''local for those requests: Parrot talks to Ollama on localhost. Choose local
+transcription and on-device polish as well to keep those audio paths local.''')
             start = original.index('  <li><strong>Update check:</strong>')
             end = original.index('</li>', start) + len('</li>')
             original = original[:start] + '  <li><strong>Updates:</strong> Automatic update checks are disabled in this build.</li>' + original[end:]
@@ -92,7 +117,24 @@ for path in Path(sys.argv[1]).glob('*.html'):
             start = original.index('<p>Grab the latest DMG')
             end = original.index('</p>', start) + len('</p>')
             original = original[:start] + '<p>For source and installation information, visit the <a href="https://github.com/juslintek/Sakviro">Sakviro repository</a>.</p>' + original[end:]
+        elif path.name == 'copilot-setup.html':
+            original = replace_once(original, '''  API key (Settings → API Keys), transcript text is sent to Anthropic during
+  calls, audio never is. Costs money per call; Parrot shows you exactly how''', '''  API key (Settings → API Keys); transcript text and relevant context are sent
+  to Anthropic during calls. Selected-window frames may also be sent when you
+  enable screen analysis for a session. Analysis requests do not send audio;
+  cloud transcription and polish are separate settings. CLI providers use your
+  signed-in CLI account instead of an API key. Costs money per call; Parrot shows you exactly how''')
         elif path.name == 'index.html':
+            original = replace_once(original, '<p class="muted">A call recorder that keeps everything on your Mac.</p>', '<p class="muted">A call recorder with on-device transcription by default.</p>')
+            original = replace_once(original, '''<p>Parrot records both sides of a call, writes the transcript as you speak, and
+(if you want) has the Assistant, an AI that watches the conversation with you. Everything
+runs on your own machine. Nothing leaves it unless you plug in your own AI key,
+and even then only transcript text is sent, never audio.</p>''', '''<p>Parrot records both sides of a call and transcribes on your Mac by default;
+  saved recordings stay on your disk. If you enable cloud transcription or polish,
+  audio goes to the chosen transcription service. If you enable an AI provider,
+  transcript text and relevant context can go to its API or CLI account service.
+  Screen analysis is optional for each session and can send frames from your
+  selected window to your chosen AI provider.</p>''')
             original = original.replace('alt="Parrot\'s meeting list with waveforms"', 'alt="Meeting list with waveforms"')
             original = original.replace('Parrot is free and open source.\n<a href="https://github.com/turantekin/Parrot">', 'Sakviro is based on the open-source Parrot project.\n<a href="https://github.com/turantekin/Parrot">')
         parser = HelpText()
