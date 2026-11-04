@@ -797,10 +797,15 @@ enum LiveLoopTest {
             // LIVELOOP_IMPORT=1: the audio-file import path instead of the live
             // loop (whole-file decode + the no-voice line filter).
             if ProcessInfo.processInfo.environment["LIVELOOP_IMPORT"] != nil {
-                let results = (try? await engine.transcribeFile(url: URL(fileURLWithPath: audioPath))) ?? []
-                print("=== import-test — \(results.count) segment(s) ===")
-                for r in results { print(String(format: "[%6.2f – %6.2f] %@", r.startTime, r.endTime, r.text)) }
-                exit(0)
+                do {
+                    let results = try await engine.transcribeFile(url: URL(fileURLWithPath: audioPath))
+                    print("=== import-test — \(results.count) segment(s) ===")
+                    for r in results { print(String(format: "[%6.2f – %6.2f] %@", r.startTime, r.endTime, r.text)) }
+                    exit(0)
+                } catch {
+                    print("import-test error: \(error.localizedDescription)")
+                    exit(1)
+                }
             }
 
             var emitted: [(text: String, start: TimeInterval, end: TimeInterval, who: String)] = []

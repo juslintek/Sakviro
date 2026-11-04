@@ -1,4 +1,6 @@
+#if !PARROT_NO_UPDATER
 import Sparkle
+#endif
 import UserNotifications
 
 /// The words and the one decision behind "an update is waiting".
@@ -33,7 +35,7 @@ enum UpdateNotice {
 /// As the updater's delegate it also tells people an update is waiting:
 /// Sparkle's silent mode shows nothing, and Parrot is an app people rarely quit.
 @MainActor
-final class AppUpdater: NSObject, SPUUpdaterDelegate {
+final class AppUpdater: NSObject {
     static let shared = AppUpdater(startSparkle: true)
 
     static let readyCategory = "PARROT_UPDATE_READY"
@@ -44,7 +46,9 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     /// nil in unbundled dev builds (`swift build` with no Info.plist, and any
     /// harness run) — starting Sparkle without a feed just logs errors, and the
     /// CLI harnesses have no business talking to the network.
+    #if !PARROT_NO_UPDATER
     private var controller: SPUStandardUpdaterController?
+    #endif
     /// Set at launch by RecordingManager: true while a call records.
     var isBusy: () -> Bool = { false }
     /// The downloaded update waiting for a quit, and Sparkle's install-now handle.
@@ -54,17 +58,20 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
 
     init(startSparkle: Bool) {
         super.init()
+        #if !PARROT_NO_UPDATER
         guard startSparkle, Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return }
         // A notice from before the last quit is stale: that update is installed now.
         UNUserNotificationCenter.current().removeDeliveredNotifications(
             withIdentifiers: [Self.readyID, Self.busyID])
         controller = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+        #endif
     }
 
     /// Menu and Settings both land here. Sparkle owns the whole conversation,
     /// including the "you're already up to date" case the old button couldn't
     /// express.
+    #if !PARROT_NO_UPDATER
     func checkForUpdates() {
         controller?.checkForUpdates(nil)
     }
@@ -79,6 +86,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         get { controller?.updater.automaticallyDownloadsUpdates ?? false }
         set { controller?.updater.automaticallyDownloadsUpdates = newValue }
     }
+    #endif
 
     /// The running bundle's version. "dev" for an unbundled binary — the
     /// version row, the sidebar footer and bug reports all read this.
@@ -91,12 +99,14 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     /// Sparkle downloaded an update and will install it on quit. Returning
     /// true takes over telling the user (and pauses further checks until the
     /// next launch, which is fine: this one installs on quit either way).
+    #if !PARROT_NO_UPDATER
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                              immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
         let version = item.displayVersionString
         MainActor.assumeIsolated { updateReady(version: version, install: immediateInstallHandler) }
         return true
     }
+    #endif
 
     func updateReady(version: String, install: @escaping () -> Void) {
         pending = (version, install)
@@ -155,3 +165,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
         }
     }
 }
+
+#if !PARROT_NO_UPDATER
+extension AppUpdater: SPUUpdaterDelegate {}
+#endif

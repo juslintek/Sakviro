@@ -31,7 +31,7 @@ struct CopilotSetupStep: View {
                               hint: "New accounts get $200 free credit. console.deepgram.com",
                               optional: true, result: $model.deepgramCheck)
                 if model.mode == .full { SpeechDownloadRow(backup: true) }
-            case .later?, nil:
+            case .cli?, .later?, nil:
                 EmptyView()  // routing never shows this step without a path
             }
         }
@@ -44,7 +44,7 @@ struct CopilotSetupStep: View {
         case .private?: "Runs on this Mac with Ollama. Private and free."
         case .balanced?: "Uses Claude. Only text is sent, audio never leaves this Mac."
         case .cloud?: "Claude gives answers. Deepgram writes the words live."
-        case .later?, nil: ""
+        case .cli?, .later?, nil: ""
         }
     }
 }

@@ -72,6 +72,7 @@ struct AIUsage: Codable {
         let label: String
         let detail: String
         let usd: Double
+        var priced = true
     }
 
     /// Pure cost math — harness-tested in ProfileTest.
@@ -122,6 +123,8 @@ struct AIUsage: Codable {
                                   provider: String?, totals: AITokenTotals) -> LineItem {
         let tokens = "\(totals.calls) calls · \(compactTokens(totals.inputTokens)) in / \(compactTokens(totals.outputTokens)) out"
         switch provider {
+        case "claudeCode", "codex", "gemini", "copilot", "customCLI":
+            return LineItem(label: "\(prefix) \(model)", detail: "\(totals.calls) calls · account usage not tracked", usd: 0, priced: false)
         case "ollama":
             // Runs on this Mac — the whole point.
             return LineItem(label: "\(prefix) \(model) — local", detail: tokens, usd: 0)

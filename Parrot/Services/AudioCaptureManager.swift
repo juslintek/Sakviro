@@ -52,7 +52,7 @@ final class AudioCaptureManager: NSObject {
     /// capture goes live), and each stream's frames handed to its file and to
     /// transcription so far. One counter per stream: each is only touched on
     /// that stream's capture thread.
-    @ObservationIgnored private var captureOrigin: TimeInterval = 0
+    @ObservationIgnored private(set) var captureOrigin: TimeInterval = 0
     @ObservationIgnored private var systemFramesOut = 0
     @ObservationIgnored private var micFramesOut = 0
     @ObservationIgnored private var lastAlignmentLogAt = Date.distantPast

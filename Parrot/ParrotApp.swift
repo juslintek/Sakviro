@@ -70,6 +70,14 @@ struct ParrotMain {
             CaptureTest.run(seconds: seconds)
             return
         }
+        if args.contains("--video-capture-test") {
+            VideoCaptureTest.run()
+            return
+        }
+        if let i = args.firstIndex(of: "--project-context-test"), i + 1 < args.count {
+            MainActor.assumeIsolated { ProjectContextHarness.run(providerName: args[i + 1]) }
+            return
+        }
         if let i = args.firstIndex(of: "--kb-add"), i + 1 < args.count {
             MainActor.assumeIsolated { KBAddTool.run(path: args[i + 1]) }
             return

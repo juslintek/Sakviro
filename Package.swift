@@ -1,6 +1,9 @@
 // swift-tools-version: 5.10
 
 import PackageDescription
+import Foundation
+
+let noUpdater = ProcessInfo.processInfo.environment["PARROT_NO_UPDATER"] == "1"
 
 let package = Package(
     name: "Parrot",
@@ -24,15 +27,18 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.5"),
     ],
     targets: [
+        .target(name: "HostHelperProtocol", path: "Shared"),
+        .executableTarget(name: "ParrotHostHelper", dependencies: ["HostHelperProtocol"], path: "HostHelper", exclude: ["Resources", "Info.plist"]),
         .executableTarget(
             name: "Parrot",
             dependencies: [
+                "HostHelperProtocol",
                 .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "CSpeexDSP", package: "CSpeexDSP"),
-                .product(name: "Sparkle", package: "Sparkle"),
-            ],
+            ] + (noUpdater ? [] : [.product(name: "Sparkle", package: "Sparkle")]),
             path: "Parrot",
+            swiftSettings: noUpdater ? [.define("PARROT_NO_UPDATER")] : [],
             linkerSettings: [
                 // The framework lives next to the executable in the bundle.
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])

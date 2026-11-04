@@ -143,9 +143,13 @@ struct ParrotCommands: Commands {
         // Parrot menu: custom About + a path to the next release.
         CommandGroup(replacing: .appInfo) {
             Button("About Parrot") { MeetingActions.showAbout() }
-            Button("Check for Updates…") {
-                AppUpdater.shared.checkForUpdates()
+            #if !PARROT_NO_UPDATER
+            if AppUpdater.shared.isAvailable {
+                Button("Check for Updates…") {
+                    AppUpdater.shared.checkForUpdates()
+                }
             }
+            #endif
         }
 
         // File: the app's objects are recordings — import and export live here.

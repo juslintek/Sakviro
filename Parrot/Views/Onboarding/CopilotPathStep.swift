@@ -17,10 +17,14 @@ struct CopilotPathStep: View {
                      badge: "Recommended")
                 card(.cloud, icon: "cloud", title: "Cloud",
                      detail: "Live word-by-word text plus Claude. Needs Deepgram and Claude keys.")
+                if CopilotProviderKind.selected.isCLI {
+                    card(.cli, icon: "terminal", title: "Keep \(CopilotProviderKind.selected.label)",
+                         detail: "Audio stays on this Mac. Meeting text goes to your CLI account's service. Your configured Assistant setting stays the same.")
+                }
             }
             .frame(maxWidth: 480)
             if onDeviceOnly {
-                Text("Balanced and Cloud are off because On-device only is on in Settings → Privacy.")
+                Text("Cloud choices are off because On-device only is on in Settings → Privacy.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.ink2)
             }

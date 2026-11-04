@@ -44,7 +44,7 @@ enum TranscriptionLanguage {
     static let defaultsKey = "transcriptionLanguage"
 
     static let options: [(code: String, name: String)] = [
-        ("en", "English"), ("tr", "Turkish"), ("es", "Spanish"), ("de", "German"),
+        ("en", "English"), ("lt", "Lithuanian"), ("tr", "Turkish"), ("es", "Spanish"), ("de", "German"),
         ("fr", "French"), ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"),
         ("ru", "Russian"), ("ar", "Arabic"), ("zh", "Chinese"), ("ja", "Japanese"),
         ("ko", "Korean"), ("hi", "Hindi"),

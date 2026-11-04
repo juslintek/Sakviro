@@ -292,6 +292,11 @@ struct LiveRecordingView: View {
                 .font(.appCaption)
                 .lineLimit(1)
             MicLevelView(level: cap.micLevel)
+            if let error = recordingManager.currentMeeting?.videoWarning ?? recordingManager.currentMeeting?.videoError {
+                Label("Video stopped: \(error)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.appCaption2)
+                    .foregroundStyle(Theme.Colors.warn)
+            }
             if cap.micMuted {
                 Label("muted — Parrot isn't recording you", systemImage: "mic.slash.circle.fill")
                     .font(.appCaption2)

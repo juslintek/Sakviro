@@ -187,6 +187,7 @@ final class TranscriptionEngine {
     private func performLoad(_ modelName: String, generation: Int) async {
         isReady = false
         loadingModelName = Self.displayName(for: modelName)
+        let previousModel = currentModel
         currentModel = modelName
         // Download progress lands on the main actor, for this load only.
         let progress: @Sendable (Double) -> Void = { [weak self] fraction in
@@ -197,6 +198,22 @@ final class TranscriptionEngine {
             }
         }
         do {
+            if Self.isMLX(previousModel), !Self.isMLX(modelName) {
+                _ = try await MLXTranscriber.perform(action: "unload", model: previousModel)
+                guard loadGeneration == generation else { return }
+            }
+            if Self.isMLX(modelName) {
+                modelState = .loading
+                _ = try await MLXTranscriber.perform(action: "load", model: modelName)
+                guard loadGeneration == generation else { return }
+                parakeet = nil
+                tinyDetector = nil
+                whisperKit = nil
+                modelState = .ready
+                isReady = true
+                Task { await self.loadSpeechDetector() }
+                return
+            }
             if Self.isParakeet(modelName) {
                 modelState = ParakeetTranscriber.isDownloaded ? .loading : .downloading(progress: 0)
                 let parakeet = try await ParakeetTranscriber.load(progress: progress)
@@ -369,7 +386,8 @@ final class TranscriptionEngine {
     /// Human-readable model names for the status line, so "which model is
     /// downloading?" is answerable mid-flight. Falls back to the raw tag.
     nonisolated static func displayName(for modelName: String) -> String {
-        switch modelName {
+        if let model = MLXTranscriber.models.first(where: { $0.id == modelName }) { return model.name }
+        return switch modelName {
         case "large-v3-turbo": "Large V3 Turbo"
         case "large-v3-v20240930_626MB": "Large V3 Turbo Compressed"
         case "tiny", "base", "small", "medium": modelName.capitalized
@@ -379,6 +397,7 @@ final class TranscriptionEngine {
     }
 
     nonisolated static func isParakeet(_ modelName: String) -> Bool { modelName == ParakeetTranscriber.modelID }
+    nonisolated static func isMLX(_ modelName: String) -> Bool { MLXTranscriber.isMLX(modelName) }
     /// The Whisper a Parakeet call switches to for other languages.
     nonisolated static let fallbackWhisper = "large-v3-v20240930_626MB"
     /// Whisper's language check while Parakeet is the model.
@@ -822,7 +841,8 @@ final class TranscriptionEngine {
 
         // Custom vocabulary: prime Whisper with the user's names/terms so it stops
         // mangling proper nouns (e.g. "LaunchEase" → "Lawn Cheese").
-        primeGlossary(into: &decodeOptions)
+        if Self.isMLX(currentModel) { glossaryActive = false }
+        else { primeGlossary(into: &decodeOptions) }
 
         // Quality + anti-garbage decoding. We derive each segment's timestamps from
         // sample offsets, so suppress Whisper's special + timestamp tokens — they were
@@ -967,7 +987,10 @@ final class TranscriptionEngine {
                                             Self.normalizedForDecode(pending), language: language)) ?? ""
                                     }
                                 case .whisper:
-                                    if let whisperKit = self.whisperKit {
+                                    if Self.isMLX(self.currentModel) {
+                                        previewText = try? await MLXTranscriber.perform(action: "transcribe", model: self.currentModel,
+                                            samples: Self.normalizedForDecode(pending), language: language)
+                                    } else if let whisperKit = self.whisperKit {
                                         let result = (try? await whisperKit.transcribe(
                                             audioArray: Self.normalizedForDecode(pending),
                                             decodeOptions: decodeOptions)) ?? []
@@ -1069,6 +1092,10 @@ final class TranscriptionEngine {
                     // On-device decode — the default path, and the per-chunk
                     // fallback when a cloud backend hiccups (never lose a chunk).
                     func decodeLocally() async throws -> [(text: String, confidence: Float?)] {
+                        if Self.isMLX(self.currentModel) {
+                            return [(try await MLXTranscriber.perform(action: "transcribe", model: self.currentModel,
+                                                                     samples: decodeSamples, language: language), nil)]
+                        }
                         if case .parakeet(let language) = self.bufferLock.withLock({ self.router.route(source) }),
                            let parakeet = self.parakeet {
                             let (text, score) = try await parakeet.transcribeScored(decodeSamples, language: language)
@@ -1180,6 +1207,9 @@ final class TranscriptionEngine {
                         }
                     } catch {
                         print("Transcription error (\(source.label)): \(error)")
+                        if Self.isMLX(self.currentModel) {
+                            await MainActor.run { self.cloudNotice = "MLX transcription failed: \(error.localizedDescription)" }
+                        }
                     }
                 }
 
@@ -1463,7 +1493,7 @@ final class TranscriptionEngine {
     }
 
     /// The on-device engine a cloud fallback lands on, for the live bar.
-    private var onDeviceName: String { parakeet != nil ? "Parakeet" : "Whisper" }
+    private var onDeviceName: String { Self.isMLX(currentModel) ? "MLX" : (parakeet != nil ? "Parakeet" : "Whisper") }
 
     /// Which language to offer switching to, or nil to stay quiet.
     /// - setting: the session's language (nil = auto-detect)
@@ -1557,6 +1587,24 @@ final class TranscriptionEngine {
     /// Whisper's per-utterance boundaries are exactly what we want.
     /// WhisperKit loads + resamples any format (m4a/mp3/wav/aac/caf) to 16 kHz mono.
     func transcribeFile(url: URL) async throws -> [TranscriptionResult] {
+        if Self.isMLX(currentModel) {
+            let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
+            let timeline = await speechTimeline(url: url)
+            var lines: [TranscriptionResult] = []
+            var start = 0
+            while start < samples.count {
+                try Task.checkCancellation()
+                let end = try MLXTranscriber.importBoundary(samples, from: start)
+                let from = Double(start) / 16000, to = Double(end) / 16000
+                if timeline.map({ Self.hasVoice($0, from: from, to: to) }) ?? true {
+                    let text = Self.cleaned(try await MLXTranscriber.perform(action: "transcribe", model: currentModel,
+                        samples: Self.normalizedForDecode(Array(samples[start..<end])), language: TranscriptionLanguage.selected))
+                    if !text.isEmpty { lines.append(TranscriptionResult(text: text, source: .them, startTime: from, endTime: to, confidence: nil)) }
+                }
+                start = end
+            }
+            return lines
+        }
         if let parakeet, let lines = try await parakeetImport(url: url, parakeet: parakeet) { return lines }
         // Whisper: on Parakeet, loaded for this file only when it needs it.
         guard let whisperKit = await ensureWhisper() else { throw RecordingError.modelNotReady }

@@ -39,6 +39,8 @@ enum CopilotPathSettings {
             let backend: TranscriptionBackend = c.deepgramKeyWorks ? .deepgram : .local
             d.set(backend.rawValue, forKey: TranscriptionBackend.defaultsKey)
             d.set(c.copilotSwitchOn && c.claudeKeyWorks, forKey: "copilotEnabled")
+        case .cli:
+            break
         case .later:
             d.set(false, forKey: "copilotEnabled")
         }
@@ -76,7 +78,7 @@ enum CopilotStatus: Equatable {
             return ollamaPulling ? .waitingForModel(progress: ollamaProgress) : .finishOllama
         case .balanced?, .cloud?:
             return hasClaudeKey ? .off : .needsClaudeKey
-        case .later?, nil:
+        case .cli?, .later?, nil:
             return .off
         }
     }

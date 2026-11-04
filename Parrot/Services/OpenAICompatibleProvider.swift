@@ -8,6 +8,14 @@ enum CopilotProviderKind: String, CaseIterable, Identifiable {
     case claude
     case ollama
     case custom
+    case claudeCode, codex, gemini, copilot, customCLI
+
+    var isCLI: Bool {
+        switch self {
+        case .claudeCode, .codex, .gemini, .copilot, .customCLI: true
+        default: false
+        }
+    }
 
     var id: String { rawValue }
 
@@ -16,6 +24,11 @@ enum CopilotProviderKind: String, CaseIterable, Identifiable {
         case .claude: "Claude (cloud)"
         case .ollama: "Ollama (local)"
         case .custom: "Other AI service"
+        case .claudeCode: "Claude Code CLI"
+        case .codex: "Codex CLI"
+        case .gemini: "Gemini CLI"
+        case .copilot: "GitHub Copilot CLI"
+        case .customCLI: "Custom CLI"
         }
     }
 
@@ -42,6 +55,8 @@ enum CopilotProviderKind: String, CaseIterable, Identifiable {
         case .claude: ClaudeAnalysisProvider.model
         case .ollama: OpenAICompatibleProvider.ollamaModel
         case .custom: OpenAICompatibleProvider.customModel
+        case .claudeCode, .codex, .gemini, .copilot, .customCLI:
+            CLIAnalysisProvider.setting(kind, "model").isEmpty ? kind.label : CLIAnalysisProvider.setting(kind, "model")
         }
     }
 
@@ -133,7 +148,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
     /// Resolved fresh on every call so Settings changes apply immediately.
     private func currentConfig() -> Config? {
         switch kindSource() {
-        case .claude:
+        case .claude, .claudeCode, .codex, .gemini, .copilot, .customCLI:
             return nil
         case .ollama:
             return Config(baseURL: URL(string: "http://localhost:11434/v1")!,
@@ -491,6 +506,9 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// Ollama, for live passes of an on-device-only call whatever the
     /// Settings choice.
     private let localCompat = OpenAICompatibleProvider { .ollama }
+    private let liveCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.liveKind }
+    private let reportsCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.reportsKind }
+    private let askCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.askKind }
 
     /// On-device only (CloudGate) routes both roles to Ollama.
     static var liveKind: CopilotProviderKind {
@@ -516,11 +534,12 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
             return "\(name) · cloud"
         case .ollama: return "\(model) · on this Mac"
         case .custom: return "\(model) · your server"
+        case .claudeCode, .codex, .gemini, .copilot, .customCLI: return "\(model) · CLI account"
         }
     }
 
     private var liveProvider: AnalysisProvider {
-        Self.liveKind == .claude ? claude : liveCompat
+        Self.liveKind == .claude ? claude : (Self.liveKind.isCLI ? (liveCLI as AnalysisProvider) : liveCompat)
     }
 
     /// The reports provider, falling back to the live provider when the chosen
@@ -528,7 +547,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// secondary backend.
     private var reportsProvider: AnalysisProvider {
         let kind = Self.reportsKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : reportsCompat
+        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (reportsCLI as AnalysisProvider) : reportsCompat)
         return candidate.isConfigured ? candidate : liveProvider
     }
 
@@ -596,7 +615,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// or live when that one isn't set up).
     private var reportsEffectiveKind: CopilotProviderKind {
         let kind = Self.reportsKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : reportsCompat
+        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (reportsCLI as AnalysisProvider) : reportsCompat)
         return candidate.isConfigured ? kind : Self.liveKind
     }
 
@@ -611,13 +630,13 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// Ask's provider, falling back to the reports one when not set up.
     private var askProvider: AnalysisProvider {
         let kind = Self.askKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : askCompat
+        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (askCLI as AnalysisProvider) : askCompat)
         return candidate.isConfigured ? candidate : reportsProvider
     }
 
     private var askEffectiveKind: CopilotProviderKind {
         let kind = Self.askKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : askCompat
+        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (askCLI as AnalysisProvider) : askCompat)
         return candidate.isConfigured ? kind : reportsEffectiveKind
     }
 
@@ -657,7 +676,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     }
 
     var usageTotals: AITokenTotals {
-        [claude.usageTotals, liveCompat.usageTotals, reportsCompat.usageTotals, askCompat.usageTotals, localCompat.usageTotals]
+        [claude.usageTotals, liveCompat.usageTotals, reportsCompat.usageTotals, askCompat.usageTotals, localCompat.usageTotals, liveCLI.usageTotals, reportsCLI.usageTotals, askCLI.usageTotals]
             .reduce(AITokenTotals()) { acc, u in
                 AITokenTotals(inputTokens: acc.inputTokens + u.inputTokens,
                               outputTokens: acc.outputTokens + u.outputTokens,
@@ -671,5 +690,8 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
         reportsCompat.resetUsage()
         askCompat.resetUsage()
         localCompat.resetUsage()
+        liveCLI.resetUsage()
+        reportsCLI.resetUsage()
+        askCLI.resetUsage()
     }
 }

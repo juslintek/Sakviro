@@ -51,7 +51,7 @@ struct PermissionsStep: View {
             Text("Start with permissions")
                 .font(Theme.Typography.title())
 
-            Text("Parrot needs two macOS permissions to hear your calls. Audio only: it never sees your screen, and nothing leaves your Mac.")
+            Text("Parrot needs two macOS permissions to hear your calls. Optional video recording asks you to choose a window or display when a call starts.")
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.ink2)
                 .multilineTextAlignment(.center)
