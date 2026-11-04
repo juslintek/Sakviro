@@ -138,8 +138,13 @@ final class CallAnalysisEngine {
     private var meSeconds: TimeInterval = 0
     private var themSeconds: TimeInterval = 0
     private var lastAnalyzedCount = 0
+    var screenDispatchAllowed: (() -> Bool)?
+    private var screenContext: ScreenContext?
+    private var screenRevision = 0
+    private var analyzedScreenRevision = 0
     private var debounceTask: Task<Void, Never>?
     private var analysisTask: Task<Void, Never>?
+    private var analysisGeneration = 0
     private var lastAnalysisEnd = Date.distantPast
     private var rerunRequested = false
     /// A "Them" question arrived since the last scheduled run: the next run
@@ -168,6 +173,9 @@ final class CallAnalysisEngine {
 
     func start(profile: CallProfile?, brief: String = "", calendarContext: String = "",
                previousCall: String = "", previousCallIsPrivate: Bool = false, forceLocal: Bool = false) {
+        analysisGeneration += 1
+        analysisTask?.cancel()
+        analysisTask = nil
         guard isEnabled else {
             status = .off
             return
@@ -175,6 +183,9 @@ final class CallAnalysisEngine {
         insights = []
         segments = []
         lastAnalyzedCount = 0
+        screenContext = nil
+        screenRevision = 0
+        analyzedScreenRevision = 0
         rerunRequested = false
         pendingUrgent = false
         oldestPendingSince = nil
@@ -202,7 +213,10 @@ final class CallAnalysisEngine {
     }
 
     func stop() {
+        analysisGeneration += 1
         isActive = false
+        screenDispatchAllowed = nil
+        screenContext = nil
         debounceTask?.cancel()
         debounceTask = nil
         analysisTask?.cancel()
@@ -228,10 +242,9 @@ final class CallAnalysisEngine {
         guard isActive, paused != isPaused else { return }
         isPaused = paused
         if paused {
+            analysisGeneration += 1
             // Off means nothing more is billed: drop the pass and the Jev
             // request already in flight too, not just the scheduled one.
-            // ponytail: a cancelled pass's lines are not re-queued; the next
-            // pass's time window still carries them.
             debounceTask?.cancel()
             debounceTask = nil
             analysisTask?.cancel()
@@ -242,7 +255,7 @@ final class CallAnalysisEngine {
             status = .paused
         } else {
             status = provider.isConfigured ? .listening : .needsAPIKey
-            if segments.count > lastAnalyzedCount {
+            if segments.count > lastAnalyzedCount || screenRevision > analyzedScreenRevision {
                 oldestPendingSince = .now
                 triggerAnalysis()
             }
@@ -317,12 +330,41 @@ final class CallAnalysisEngine {
         }
     }
 
+    func ingestScreenContext(_ context: ScreenContext) {
+        guard isActive, isEnabled, provider.isConfigured else { return }
+        screenContext = context
+        screenRevision += 1
+        if !isPaused { triggerAnalysis() }
+    }
+
+    func refreshScreenActivity(_ date: Date) {
+        guard var context = screenContext else { return }
+        context.observedAt = date.timeIntervalSince1970
+        screenContext = context
+    }
+
+    func clearScreenContext(forceLocal: Bool? = nil) {
+        analysisGeneration += 1
+        if let forceLocal { self.forceLocal = forceLocal }
+        screenContext = nil
+        screenRevision = 0
+        analyzedScreenRevision = 0
+        analysisTask?.cancel()
+        analysisTask = nil
+        rerunRequested = false
+        if isActive && !isPaused {
+            status = .listening
+            if segments.count > lastAnalyzedCount { triggerAnalysis() }
+        }
+    }
+
     // MARK: - Analysis
 
     private func triggerAnalysis() {
         // The pause guard also covers the rerun path out of runAnalysis: a
         // rerun queued before pausing must not fire during the pause.
-        guard isActive, !isPaused, segments.count > lastAnalyzedCount else { return }
+        guard isActive, !isPaused,
+              segments.count > lastAnalyzedCount || screenRevision > analyzedScreenRevision else { return }
 
         // One call in flight at a time; queue a rerun so new context isn't dropped.
         if analysisTask != nil {
@@ -332,25 +374,25 @@ final class CallAnalysisEngine {
 
         // A question waits the short question floor, never the full one; the
         // flag survives a queued rerun so a mid-call question keeps its lane.
-        let floor = pendingUrgent ? questionFloor : minimumInterval
+        let floor = screenRevision > analyzedScreenRevision ? min(5, minimumInterval) : (pendingUrgent ? questionFloor : minimumInterval)
         pendingUrgent = false
         let wait = floor - Date.now.timeIntervalSince(lastAnalysisEnd)
+        let generation = analysisGeneration
         analysisTask = Task { [weak self] in
             if wait > 0 {
                 try? await Task.sleep(for: .seconds(wait))
             }
             guard !Task.isCancelled else { return }
-            await self?.runAnalysis()
+            await self?.runAnalysis(generation: generation)
         }
     }
 
-    private func runAnalysis() async {
+    private func runAnalysis(generation: Int) async {
         // A cancelled run must touch nothing: stop() may already have been
         // followed by a new start(), so isActive alone can't distinguish "this
         // session" from "the next one" — inserting stale insights or nil-ing the
         // new session's task handle would corrupt the new call.
-        guard isActive, !Task.isCancelled else {
-            if !Task.isCancelled { analysisTask = nil }
+        guard isActive, generation == analysisGeneration, !Task.isCancelled else {
             return
         }
 
@@ -368,8 +410,18 @@ final class CallAnalysisEngine {
         // a transient error permanently skips this speech (no retry ever fires
         // until new speech arrives).
         let previousAnalyzedCount = lastAnalyzedCount
+        let previousScreenRevision = analyzedScreenRevision
+        let currentScreen = screenContext.flatMap {
+            Date.now.timeIntervalSince1970 - $0.observedAt <= 15 ? $0 : nil
+        }
+        let currentScreenRevision = screenRevision
+        if currentScreen == nil && segments.count == lastAnalyzedCount {
+            analysisTask = nil
+            status = .listening
+            return
+        }
         let previousPendingSince = oldestPendingSince
-        lastAnalyzedCount = segments.count
+        let currentAnalyzedCount = segments.count
         oldestPendingSince = nil
 
         // Time-based context window (Settings → Copilot). The old fixed
@@ -400,7 +452,7 @@ final class CallAnalysisEngine {
             if let question = Self.latestQuestion(in: recent.map { ($0.text, $0.source) }) {
                 references = await kb.search(query: question, profileID: profile?.id, topK: 2)
             }
-            let windowQuery = Self.knowledgeQuery(brief: callBrief, recent: recent.map(\.text))
+            let windowQuery = Self.knowledgeQuery(brief: callBrief, recent: recent.map(\.text) + [currentScreen?.text ?? ""])
             for reference in await kb.search(query: windowQuery, profileID: profile?.id)
             where !references.contains(where: { $0.text == reference.text }) {
                 references.append(reference)
@@ -429,13 +481,14 @@ final class CallAnalysisEngine {
             calendarContext: calendarContext,
             previousCallContext: previousCallContext,
             previousCallIsPrivate: previousCallIsPrivate,
-            forceLocal: forceLocal
+            forceLocal: forceLocal,
+            screenContext: currentScreen
         )
 
+        guard currentScreen == nil || screenDispatchAllowed?() != false else { return }
         do {
             let result = try await provider.analyze(request)
-            guard isActive, !Task.isCancelled else {
-                if !Task.isCancelled { analysisTask = nil }
+            guard isActive, generation == analysisGeneration, !Task.isCancelled else {
                 return
             }
             // Excerpts shown since the last pass: a grounded Haiku card on the
@@ -507,8 +560,7 @@ final class CallAnalysisEngine {
                     open.map { (a: "\(draft.title). \(draft.detail)", b: "\($0.title). \($0.detail)") }
                 }
                 if let scores = try? await matcher.sameIssue(pairs: pairs) {
-                    guard isActive, !Task.isCancelled else {
-                        if !Task.isCancelled { analysisTask = nil }
+                    guard isActive, generation == analysisGeneration, !Task.isCancelled else {
                         return
                     }
                     let keep = Self.dedupKeepMask(scores: scores, drafts: candidates.count,
@@ -519,6 +571,9 @@ final class CallAnalysisEngine {
                     admitted = zip(candidates, keep).filter { $0.1 }.map { $0.0 }
                 }
             }
+            guard isActive, generation == analysisGeneration, !Task.isCancelled else { return }
+            lastAnalyzedCount = currentAnalyzedCount
+            analyzedScreenRevision = currentScreenRevision
             let unique = admitted.map { Insight(kindKey: $0.kindKey, title: $0.title, detail: $0.detail, callTime: anchorTime, source: $0.source, reply: $0.reply) }
             insights.insert(contentsOf: unique, at: 0)
             for inserted in unique {
@@ -530,8 +585,9 @@ final class CallAnalysisEngine {
                                             pinnedKinds: Set(profile?.kinds.filter(\.isPinned).map(\.key) ?? [])))
             status = .listening
         } catch let error as AnalysisError {
-            if isActive, !Task.isCancelled {
+            if isActive, generation == analysisGeneration, !Task.isCancelled {
                 lastAnalyzedCount = previousAnalyzedCount
+                analyzedScreenRevision = previousScreenRevision
                 oldestPendingSince = previousPendingSince
                 if case .missingAPIKey = error {
                     status = .needsAPIKey
@@ -540,7 +596,7 @@ final class CallAnalysisEngine {
                 }
             }
         } catch {
-            if isActive, !Task.isCancelled {
+            if isActive, generation == analysisGeneration, !Task.isCancelled {
                 lastAnalyzedCount = previousAnalyzedCount
                 oldestPendingSince = previousPendingSince
                 status = .error(error.localizedDescription)
@@ -549,7 +605,7 @@ final class CallAnalysisEngine {
 
         // A cancelled task must not release the (possibly new) session's slot
         // or fire its rerun.
-        guard !Task.isCancelled else { return }
+        guard generation == analysisGeneration, !Task.isCancelled else { return }
         lastAnalysisEnd = .now
         analysisTask = nil
 

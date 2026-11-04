@@ -10,6 +10,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Parrot/ParrotApp.swift` | 290 | `@main`; parses CLI harness flags before the SwiftUI `App` starts |
 | `Parrot/ProfileTest.swift` | 5750 | `--profile-test`: headless logic harness, ~1850 checks |
 | `Parrot/ProfileTest+Parakeet.swift` | 190 | `--profile-test` checks for Parakeet: language router, per-side probe, recommendation, rewind, imports |
+| `Parrot/VisionCaptureHarness.swift` | 80 | `--vision-capture-test [codex|copilot|claude]`: own synthetic window through ScreenCaptureKit, JPEG sampler and packaged CLI image analysis |
 | `Parrot/SnapshotTool.swift` | 1827 | Offscreen PNG renderers + transcribe/analyze/capture harnesses; `--language-test <audio> [model] [seconds]` runs the live language check on a saved track; `--echo-replay` scores a recorded call's Me lines with the echo gate; `--aec-replay <aec-mic> <aec-ref>` reruns the echo canceller on a `PARROT_AEC_DUMP=1` recording with shifted pairings and other filter tails; `--liveloop-test` takes `LIVELOOP_MIC` to feed both tracks (Deepgram: signed dist binary + `-transcriptionBackend deepgram`); `ANALYZE_REPORT=all --analyze-test ollama <model>` writes every built-in report on a model and checks the sections came back; `--store-upgrade-test <file>` upgrades an older store copy (read-only like MCP, then with the Profiles 2.0 migration); `--ask-chat-test, --ask-real` runs a real multi-turn Ask Parrot chat against Claude or Ollama; `--about-test <store> <id> [provider] [model]` merges a meeting's same-named speakers and writes its title + About on a scratch copy |
 | `Parrot/CopilotHarness.swift` | 360 | `--kb-add`, `--doc-answer-eval` (Jev precision/recall), `--copilot-replay` (question-to-card latency; `--real` sends passes to real Claude Haiku and prints each card's call time) |
 | `Parrot/ToneHarness.swift` | 180 | `--nudge-replay [id] [--store path]` (a saved call through the live nudge rules, on a copy of the store, with the time it took), `--tone-snapshot <png>` (report card collapsed with one moment playing, pill, banner; light + dark), `--pill-test [png]` (a real pill on screen, captured with ScreenCaptureKit to prove it's left out; `PILL_TEST_SHARED=1` is the control) |
@@ -39,7 +40,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 
 | File | L | Purpose |
 |---|---|---|
-| `Services/RecordingManager.swift` | 1496 | Orchestrates a recording session end-to-end; the hub; echo dedupe (`isBleed` drops a Me line whose words mostly repeat an other-side line close by, scored on the Me line so their short word can't delete mine, a 1-2 word line only once the echo gate heard the speakers; `strippingEcho` cuts their words out of a Me line once the call's echo gate has fired; `dedupedEcho` does both for the post-call polish); `justFinished` (the window's "Call saved" sheet); `writeReport` (Write report on a saved meeting); `writeAbout` (AI title + About after the report, backfilled on open); "Still recording?" reminder; live speaker sweeps (stable/window mapping, power pacing) |
+| `Services/RecordingManager.swift` | 1496 | Orchestrates meeting and screen-only sessions, screen privacy policy and capture lifecycle; the hub; echo dedupe (`isBleed` drops a Me line whose words mostly repeat an other-side line close by, scored on the Me line so their short word can't delete mine, a 1-2 word line only once the echo gate heard the speakers; `strippingEcho` cuts their words out of a Me line once the call's echo gate has fired; `dedupedEcho` does both for the post-call polish); `justFinished` (the window's "Call saved" sheet); `writeReport` (Write report on a saved meeting); `writeAbout` (AI title + About after the report, backfilled on open); "Still recording?" reminder; live speaker sweeps (stable/window mapping, power pacing) |
 | `Services/CallAbout.swift` | 100 | Pure: the title + "About this call" prompt (misheard-name rule), report or transcript opening as input, JSON / "Title:" line parsing and clipping |
 | `Services/AudioCaptureManager.swift` | 1120 | System audio (tap on 15+, SCK on 14.x/rescue) + mic tap, buffer conversion; once-a-minute echo log with the mic volume slider; `PARROT_AEC_DUMP=1` saves the canceller's raw mic + paired reference (`AECDump`) |
 | `Services/SystemAudioTap.swift` | 294 | Core Audio process tap: audio-only capture, no Screen Recording (macOS 15+) |
@@ -51,9 +52,12 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Services/EngineRecommendation.swift` | 25 | The model a new install starts on: Parakeet only when every Mac language and past call fits its 25 |
 | `Services/CloudTranscription.swift` | 452 | Opt-in Groq (batch) and Deepgram (streaming; finals carry the words' spoken span) backends + WAV encode; `TranscriptPolisher`: the post-call Groq re-decode, which skips Me lines the echo gate calls echo |
 | `Services/DiarizationEngine.swift` | 156 | FluidAudio pyannote diarization (CoreML): labels + per-speaker embeddings; whole file or a live 60 s tail |
-| `Services/AnalysisProvider.swift` | 605 | `AnalysisProvider` protocol, request/result types, prompt building, **Keychain helpers** (~L575) |
+| `Services/ScreenContext.swift` | 35 | Sampled frame metadata and bounded JPEG validation |
+| `Services/VideoCaptureService.swift` | 400 | ScreenCaptureKit source selection and optional archive; bounded changed-frame JPEG sampler |
+| `Services/CLIAnalysisProvider.swift` | 150 | CLI provider requests including native image attachments through the host helper |
+| `Services/AnalysisProvider.swift` | 605 | `AnalysisProvider` protocol, request/result types and screen-aware prompt building, **Keychain helpers** (~L575) |
 | `Services/OpenAICompatibleProvider.swift` | 528 | OpenAI-shaped LLM client (incl. Ollama); provider switching |
-| `Services/CallAnalysisEngine.swift` | 815 | Drives live Copilot passes; per-pace question floor; Jev fast path ("From your docs" excerpt); mid-call On/Off (`setPaused` drops in-flight work) |
+| `Services/CallAnalysisEngine.swift` | 815 | Drives live Copilot passes and screen-context cancellation; per-pace question floor; Jev fast path ("From your docs" excerpt); mid-call On/Off (`setPaused` drops in-flight work) |
 | `Services/JevDocMatcher.swift` | 175 | TypeSafe "Jev" client: one probability per KB chunk that it answers the question; same-issue verdicts for card dedup |
 | `Services/KnowledgeBaseService.swift` | 660 | Ingests/chunks KB docs (heading-aware), on-device multilingual embeddings (re-embeds stale vectors), hybrid BM25 + embedding retrieval; folders and Use for, `isInPlay` (the one rule for what the Assistant may quote), index v2 upgrade + backup |
 | `Services/ProfileStore.swift` | 300 | Persists and mutates `CallProfile`s; the one-time Profiles 2.0 migration (backup, sharing ids, restore point, report choice); import / apply / restore a `.parrotprofile` (privacy only tightens) |
@@ -106,10 +110,10 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 |---|---|---|
 | `Views/ContentView.swift` | 350 | Root split view (`MainPage`: dashboard/settings/ask/aiApps/meeting) + empty state + corner bug button; shows the Profiles 2.0 screen once; profile review sheet + suggestion banner; opens a call that just stopped + `CallFinishedSheet` (title, note) |
 | `Views/SidebarView.swift` | 390 | Meeting list, rows, talk-ratio strip; search runs as one database query per pause in typing (never in `body`) |
-| `Views/DashboardView.swift` | 420 | Landing stats (word count cached per meeting) + recent meetings |
+| `Views/DashboardView.swift` | 420 | Landing stats, recent meetings and explicit screen-analysis consent |
 | `Views/CopilotHomeCard.swift` | 110 | Home card: turn on Copilot, finish setup, waiting for the model, just turned on |
 | `Views/WhatsNewCard.swift` | 39 | Home card once per version after an update: headline, highlights, Read the full story (changelog anchor), Got it |
-| `Views/LiveRecordingView.swift` | 781 | In-call screen: chat bubbles, mic level, side tabs; top-bar Assistant On/Off switch |
+| `Views/LiveRecordingView.swift` | 781 | In-call screen: chat bubbles, selected-window indicator, mic level, side tabs; top-bar Assistant On/Off switch |
 | `Views/CopilotPanelView.swift` | 770 | Live insight cards, pinned blockers, suggested replies |
 | `Views/BriefViews.swift` | 147 | Brief summary line, documents-in-play row, live "Briefed" card (dashboard + copilot panel) |
 | `Views/SettingsCards.swift` | 191 | Settings building blocks: page, titled card, row (optional header tint), tag chip (the landing-page window look) |

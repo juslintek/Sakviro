@@ -6,7 +6,7 @@ trap 'rm -rf "$work"' EXIT
 ffmpeg -v error -f lavfi -i 'color=c=blue:s=64x64:r=10:d=1.4' -c:v libx264 -pix_fmt yuv420p "$work/input.mp4"
 ffmpeg -v error -f lavfi -i 'sine=frequency=440:duration=1.4' -c:a pcm_s16le "$work/system.caf"
 ffmpeg -v error -f lavfi -i 'sine=frequency=880:duration=1.4' -c:a pcm_s16le "$work/mic.caf"
-swiftc -parse-as-library Parrot/Services/VideoCaptureService.swift tests/video-mux/Check.swift -o "$work/check"
+swiftc -parse-as-library Parrot/Services/ScreenContext.swift Parrot/Services/VideoCaptureService.swift tests/video-mux/Check.swift -o "$work/check"
 "$work/check" "$work/input.mp4" "$work/system.caf" "$work/mic.caf" "$work/output.mp4"
 ffprobe -v error -select_streams v:0 -show_entries stream=start_time -of default=noprint_wrappers=1:nokey=1 "$work/output.mp4" > "$work/video-start"
 python3 - "$work/video-start" <<'PY'

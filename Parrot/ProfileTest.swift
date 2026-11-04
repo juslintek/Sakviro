@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import SwiftData
 import Security
+import CoreVideo
 import WhisperKit
 
 /// Offscreen logic harness. Run: `.build/debug/Parrot --profile-test`
@@ -45,6 +46,8 @@ enum ProfileTest {
         testIdleReminder()
         testCopilotBudget()
         testAssistantSwitch()
+        testScreenPolicyCancellation()
+        testMeetingPrivacyObservation()
         testLanguageMismatch()
         testJevMatcher()
         testBriefCard()
@@ -2557,6 +2560,130 @@ enum ProfileTest {
                   engine.isEnabled && engine.provider.isConfigured)
             engine.start(profile: ProfilePresets.all().first)
             check("switch: a new call starts with the Assistant on", !engine.isPaused)
+            engine.stop()
+        }
+    }
+
+    private final class ScreenPolicyRecorder: AnalysisProvider, @unchecked Sendable {
+        private let lock = NSLock()
+        private var requests: [AnalysisRequest] = []
+        private var continuations: [CheckedContinuation<AnalysisResult, Never>] = []
+        var isConfigured: Bool { true }
+        var captured: [AnalysisRequest] { lock.lock(); defer { lock.unlock() }; return requests }
+        func analyze(_ request: AnalysisRequest) async throws -> AnalysisResult {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                requests.append(request)
+                continuations.append(continuation)
+                lock.unlock()
+            }
+        }
+        func finish(_ index: Int, title: String) {
+            lock.lock()
+            let continuation = continuations[index]
+            lock.unlock()
+            continuation.resume(returning: AnalysisResult(
+                insights: [InsightDraft(kindKey: "suggestion", title: title, detail: "test", source: nil)],
+                sentiment: [:], read: nil, coach: nil, resolved: []))
+        }
+        func summarize(transcript: String, insightTitles: [String], bookmarks: [String], instructions: String,
+                       counterpart: String, template: ReportTemplate) async throws -> String { "" }
+        func coachingReport(transcript: String, talkPercentMe: Int, instructions: String,
+                            counterpart: String, template: ReportTemplate) async throws -> String { "" }
+        func complete(system: String, user: String, maxTokens: Int) async throws -> String { "" }
+    }
+
+    @MainActor
+    static func testScreenPolicyCancellation() {
+        withDefaults(["copilotEnabled": true, "copilotPace": "fast", "copilotProvider": "codex",
+                      CloudGate.globalKey: false, Redactor.enabledKey: false]) {
+            func wait(_ seconds: TimeInterval, until done: () -> Bool) {
+                let deadline = Date.now + seconds
+                while !done() && Date.now < deadline { RunLoop.main.run(until: .now + 0.02) }
+            }
+            let ai = ScreenPolicyRecorder()
+            let engine = CallAnalysisEngine(provider: ai)
+            engine.start(profile: ProfilePresets.all().first { $0.name == "Sales discovery" })
+            engine.ingest(text: "What is the price?", at: 10, source: .them)
+            let frame = ScreenContext(jpeg: Data([1]), text: "", capturedAt: Date.now.timeIntervalSince1970, sourceLabel: "Test")
+            engine.ingestScreenContext(frame)
+            wait(3) { ai.captured.count == 1 }
+            check("screen policy: first pass includes the selected frame", ai.captured.first?.screenContext?.jpeg != nil)
+            UserDefaults.standard.set(true, forKey: CloudGate.globalKey)
+            engine.clearScreenContext(forceLocal: true)
+            wait(3) { ai.captured.count == 2 }
+            check("screen policy: pending audio retries without pixels", ai.captured.count == 2 && ai.captured[1].screenContext == nil && ai.captured[1].forceLocal)
+            if !ai.captured.isEmpty { ai.finish(0, title: "stale visual result") }
+            RunLoop.main.run(until: .now + 0.1)
+            check("screen policy: late visual result is discarded", engine.insights.isEmpty)
+            if ai.captured.count > 1 { ai.finish(1, title: "audio result") }
+            wait(3) { !engine.insights.isEmpty }
+            check("screen policy: audio backlog survives cancellation", engine.insights.contains { $0.title == "audio result" })
+            check("screen policy: global privacy blocks images", !SwitchingAnalysisProvider.canSendScreenImages())
+            UserDefaults.standard.set(false, forKey: CloudGate.globalKey)
+            UserDefaults.standard.set(true, forKey: Redactor.enabledKey)
+            check("screen policy: redaction blocks images", !SwitchingAnalysisProvider.canSendScreenImages())
+            UserDefaults.standard.set(false, forKey: Redactor.enabledKey)
+            UserDefaults.standard.set("gemini", forKey: "copilotProvider")
+            check("screen policy: unsupported provider blocks images", !SwitchingAnalysisProvider.canSendScreenImages())
+            UserDefaults.standard.set("copilot", forKey: "copilotProvider")
+            check("screen policy: supported provider permits images", SwitchingAnalysisProvider.canSendScreenImages())
+            check("screen policy: private meeting blocks images", !SwitchingAnalysisProvider.canSendScreenImages(forceLocal: true))
+            engine.stop()
+        }
+    }
+
+    @MainActor
+    static func testMeetingPrivacyObservation() {
+        withDefaults(["copilotEnabled": true, "copilotPace": "fast", "copilotProvider": "codex",
+                      CloudGate.globalKey: false, Redactor.enabledKey: false]) {
+            func wait(_ seconds: TimeInterval, until done: () -> Bool) {
+                let deadline = Date.now + seconds
+                while !done() && Date.now < deadline { RunLoop.main.run(until: .now + 0.02) }
+            }
+            let schema = Schema([Meeting.self, TranscriptSegment.self, CallInsight.self, CallProfile.self, SpeakerProfile.self])
+            guard let container = try? ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]) else {
+                check("screen observer: in-memory container", false)
+                return
+            }
+            let meeting = Meeting()
+            container.mainContext.insert(meeting)
+            let ai = ScreenPolicyRecorder()
+            let manager = RecordingManager(provider: ai)
+            let engine = manager.callAnalysisEngine
+            let sampler = ScreenFrameSampler(interval: 0.1)
+            var samples = 0
+            sampler.onContext = { context in samples += 1; engine.ingestScreenContext(context) }
+            manager.observeScreenPrivacyForTest(meeting: meeting, sampler: sampler)
+            engine.start(profile: ProfilePresets.all().first { $0.name == "Sales discovery" })
+            engine.ingest(text: "What is the price?", at: 10, source: .them)
+            var buffer: CVPixelBuffer?
+            let status = CVPixelBufferCreate(nil, 128, 128, kCVPixelFormatType_32BGRA, nil, &buffer)
+            guard status == kCVReturnSuccess, let buffer else {
+                check("screen observer: pixel buffer", false)
+                sampler.stop()
+                engine.stop()
+                return
+            }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            memset(CVPixelBufferGetBaseAddress(buffer)!, 64, CVPixelBufferGetDataSize(buffer))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            sampler.submit(buffer)
+            wait(3) { ai.captured.count == 1 && samples == 1 }
+            check("screen observer: real sample reaches provider", ai.captured.first?.screenContext?.jpeg != nil && samples == 1)
+            meeting.onDeviceOnly = true
+            wait(3) { ai.captured.count >= 2 }
+            check("screen observer: privacy change retries audio without pixels", ai.captured.count >= 2 && ai.captured[1].screenContext == nil && ai.captured[1].forceLocal)
+            sampler.submit(buffer)
+            RunLoop.main.run(until: .now + 0.4)
+            check("screen observer: sampler stops delivering pixels", samples == 1 && meeting.videoWarning != nil)
+            if !ai.captured.isEmpty { ai.finish(0, title: "stale visual result") }
+            RunLoop.main.run(until: .now + 0.1)
+            check("screen observer: late visual result is discarded", engine.insights.isEmpty)
+            if ai.captured.count > 1 { ai.finish(1, title: "audio result") }
+            wait(3) { !engine.insights.isEmpty }
+            check("screen observer: audio backlog survives", engine.insights.contains { $0.title == "audio result" })
+            sampler.stop()
             engine.stop()
         }
     }

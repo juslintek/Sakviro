@@ -1,3 +1,7 @@
+# Sakviro fork
+
+This branch is a local assistant fork of [Parrot](https://github.com/turantekin/Parrot). It adds CLI providers, MLX transcription and optional selected-window analysis. The original project and its documentation follow below. See [LOCAL-ASSISTANT.md](LOCAL-ASSISTANT.md) for this fork's build and privacy details.
+
 <a href="https://openparrot.app"><img src=".github/readme/banner.png" alt="Parrot: Help during the call. Not after it. A meeting recorder for your Mac with a live AI assistant." width="100%"></a>
 
 <p align="center">

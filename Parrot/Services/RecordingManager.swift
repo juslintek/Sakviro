@@ -5,6 +5,7 @@ import AVFoundation
 import UserNotifications
 import IOKit.ps
 import ScreenCaptureKit
+import Observation
 
 /// Orchestrates audio capture, transcription, and storage for a recording session.
 @MainActor
@@ -72,6 +73,58 @@ final class RecordingManager {
     /// before isRecording is set — which would start a duplicate transcription
     /// loop and double every segment.
     private var isStarting = false
+    private var screenSampler: ScreenFrameSampler?
+    var isWatchingSelectedWindow: Bool { screenSampler != nil }
+    private var screenSettingsObserver: NSObjectProtocol?
+    private var screenSettingsSignature = ""
+    private var screenArchive = false
+    private var screenSession = UUID()
+
+    private func screenSignature(forceLocal: Bool) -> String {
+        let kind = SwitchingAnalysisProvider.liveKind
+        return "\(kind.rawValue)|\(CopilotProviderKind.modelName(for: kind))|\(forceLocal)|\(CloudGate.forcesLocal)|\(Redactor.isEnabled)|\(UserDefaults.standard.bool(forKey: Redactor.namesKey))"
+    }
+    private func updateScreenPolicy(meeting: Meeting, session: UUID) {
+        guard screenSession == session, let sampler = screenSampler else { return }
+        let signature = screenSignature(forceLocal: meeting.onDeviceOnly)
+        guard signature != screenSettingsSignature else { return }
+        screenSettingsSignature = signature
+        let enabled = SwitchingAnalysisProvider.canSendScreenImages(forceLocal: meeting.onDeviceOnly)
+        sampler.setEnabled(false)
+        callAnalysisEngine.clearScreenContext(forceLocal: meeting.onDeviceOnly)
+        meeting.videoWarning = enabled ? nil : "Screen analysis paused. Choose a vision-capable AI and review your privacy settings."
+        sampler.setEnabled(enabled)
+    }
+
+    private func observeScreenPrivacy(meeting: Meeting, session: UUID) {
+        guard screenSession == session, screenSampler != nil else { return }
+        withObservationTracking {
+            _ = meeting.onDeviceOnly
+        } onChange: { [weak self, weak meeting] in
+            Task { @MainActor in
+                guard let self, let meeting, self.screenSession == session else { return }
+                self.updateScreenPolicy(meeting: meeting, session: session)
+                self.observeScreenPrivacy(meeting: meeting, session: session)
+            }
+        }
+    }
+
+    func observeScreenPrivacyForTest(meeting: Meeting, sampler: ScreenFrameSampler) {
+        let session = UUID()
+        screenSession = session
+        screenSampler = sampler
+        screenSettingsSignature = ""
+        updateScreenPolicy(meeting: meeting, session: session)
+        observeScreenPrivacy(meeting: meeting, session: session)
+    }
+
+    private func requireScreenAnalysis(profile: CallProfile?) throws {
+        let local = UserDefaults.standard.bool(forKey: CloudGate.globalKey) || profile?.onDeviceOnly == true
+        guard SwitchingAnalysisProvider.canSendScreenImages(forceLocal: local) else {
+            throw RecordingError.screenAnalysisUnavailable
+        }
+    }
+
     /// Mirror of isStarting for the stop path: stop now drains the transcription
     /// backlog (seconds, not instant), so without this a double-stop would persist
     /// insights twice and run postProcess twice, and a start-during-stop would
@@ -330,7 +383,8 @@ final class RecordingManager {
     /// permissions, then starts. Returns without starting (and without throwing)
     /// when a permission flow was triggered instead.
     func preflightPermissionsAndStart(modelContext: ModelContext,
-                                      profileOverride: CallProfile? = nil) async throws {
+                                      profileOverride: CallProfile? = nil, useScreen: Bool = false) async throws {
+        if useScreen { try requireScreenAnalysis(profile: profileOverride ?? profileStore.activeProfile) }
         // Check the system-audio permission BEFORE touching any capture API.
         // macOS 15+: the audio-only tap permission (optimistic after the one
         // official prompt — its grant can't be read back, see PermissionFlow).
@@ -353,38 +407,45 @@ final class RecordingManager {
         // Non-fatal: system audio still records if denied.
         _ = await PermissionFlow.requestMicrophone()
 
-        try await startRecording(modelContext: modelContext, profileOverride: profileOverride)
+        try await startRecording(modelContext: modelContext, profileOverride: profileOverride, useScreen: useScreen)
     }
 
     /// `profileOverride` records this one call under another profile (a
     /// detected call whose calendar title names one) without changing the
     /// user's active choice.
-    func startRecording(modelContext: ModelContext, profileOverride: CallProfile? = nil) async throws {
+    func startRecording(modelContext: ModelContext, profileOverride: CallProfile? = nil,
+                        mode: SessionMode = .meeting, useScreen: Bool = false) async throws {
         self.modelContext = modelContext
         // Reject re-entry up front (before any await) so a double-trigger can't
         // start two recordings / two transcription loops. Also blocked while a
         // file import is running — both drive the same shared WhisperKit.
         guard !isRecording, !isStarting, !isStopping, importProgress == nil else { return }
-        guard transcriptionEngine.isReady else {
+        guard mode == .screenOnly || transcriptionEngine.isReady else {
             throw RecordingError.modelNotReady
         }
         isStarting = true
         defer { isStarting = false }
 
+        let profile = profileOverride ?? profileStore.activeProfile
+        if mode == .screenOnly || useScreen { try requireScreenAnalysis(profile: profile) }
+
         var videoFilter: SCContentFilter?
-        if UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
+        if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
             let capture = VideoCaptureService()
-            guard let filter = try await capture.chooseSource() else { return }
+            guard let filter = try await capture.chooseSource(windowOnly: mode == .screenOnly || useScreen) else { return }
             videoFilter = filter
             videoCapture = capture
         }
 
+        if mode == .screenOnly || useScreen { try requireScreenAnalysis(profile: profile) }
+
         // Create meeting
         let meeting = Meeting()
+        meeting.sessionMode = mode
+        if mode == .screenOnly { meeting.title = "Screen session" }
         modelContext.insert(meeting)
 
         // Persist active profile/brief/snapshot onto the meeting
-        let profile = profileOverride ?? profileStore.activeProfile
         meeting.profile = profile
         meeting.profileSnapshotData = profile.flatMap { try? JSONEncoder().encode($0.kinds) }
 
@@ -401,7 +462,7 @@ final class RecordingManager {
         var calendarContext = ""
         var lastCall = ""
         var previousIsPrivate = false
-        if calendar.isConnected, let event = calendar.currentEvent() {
+        if mode == .meeting, calendar.isConnected, let event = calendar.currentEvent() {
             meeting.apply(event)
             if UserDefaults.standard.bool(forKey: CalendarService.useDetailsKey) {
                 calendarContext = CalendarService.inviteContext(for: event)
@@ -422,25 +483,90 @@ final class RecordingManager {
         // Set up audio capture. On failure, remove the just-inserted meeting —
         // otherwise it lingers as a ghost .recording row until the next launch's
         // orphan reconciliation flags it "interrupted".
-        do {
-            try await audioCaptureManager.startCapture()
-        } catch {
-            videoCapture = nil
-            modelContext.delete(meeting)
-            try? modelContext.save()
-            throw error
+        if mode == .meeting {
+            do {
+                try await audioCaptureManager.startCapture()
+            } catch {
+                videoCapture = nil
+                modelContext.delete(meeting)
+                try? modelContext.save()
+                throw error
+            }
+            meeting.systemAudioPath = audioCaptureManager.systemAudioURL?.path ?? ""
+            meeting.micAudioPath = audioCaptureManager.micAudioURL?.path
         }
-        meeting.systemAudioPath = audioCaptureManager.systemAudioURL?.path ?? ""
-        meeting.micAudioPath = audioCaptureManager.micAudioURL?.path
         if let videoFilter, let capture = videoCapture {
-            capture.onError = { [weak meeting] message in
-                Task { @MainActor in meeting?.videoWarning = message }
+            screenArchive = UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey)
+            if mode == .screenOnly || useScreen {
+                let session = UUID()
+                screenSession = session
+                let sampler = ScreenFrameSampler(onSample: { [weak self] context in
+                    Task { @MainActor in
+                        guard let self, self.screenSession == session, self.screenSampler != nil else { return }
+                        guard self.screenSignature(forceLocal: meeting.onDeviceOnly) == self.screenSettingsSignature else {
+                            self.updateScreenPolicy(meeting: meeting, session: session)
+                            return
+                        }
+                        guard SwitchingAnalysisProvider.canSendScreenImages(forceLocal: meeting.onDeviceOnly) else { return }
+                        self.callAnalysisEngine.ingestScreenContext(context)
+                    }
+                }, onError: { [weak self, weak meeting] message in
+                    Task { @MainActor in
+                        guard let self, self.screenSession == session else { return }
+                        meeting?.videoWarning = message
+                    }
+                })
+                capture.onFrame = { [weak sampler] buffer, capturedAt in sampler?.submit(buffer, capturedAt: capturedAt) }
+                capture.onActivity = { [weak self, weak sampler] date in
+                    sampler?.markObserved(at: date)
+                    Task { @MainActor in
+                        guard let self, self.screenSession == session else { return }
+                        self.callAnalysisEngine.refreshScreenActivity(date)
+                    }
+                }
+                capture.onInactive = { [weak self, weak sampler] in
+                    sampler?.invalidate()
+                    Task { @MainActor in
+                        guard let self, self.screenSession == session else { return }
+                        self.callAnalysisEngine.clearScreenContext()
+                    }
+                }
+                screenSampler = sampler
+                screenSettingsSignature = ""
+                screenSettingsObserver = NotificationCenter.default.addObserver(
+                    forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+                ) { [weak self, weak meeting] _ in
+                    Task { @MainActor in
+                        guard let self, let meeting, self.screenSession == session else { return }
+                        self.updateScreenPolicy(meeting: meeting, session: session)
+                    }
+                }
+
+            }
+            capture.onError = { [weak self, weak meeting, weak capture] message in
+                Task { @MainActor in
+                    guard let self, let capture, self.videoCapture === capture else { return }
+                    meeting?.videoWarning = message
+                    self.screenSampler?.stop()
+                    self.screenSampler = nil
+                    self.callAnalysisEngine.clearScreenContext()
+                }
             }
             do {
-                try await capture.start(filter: videoFilter, audioOrigin: audioCaptureManager.captureOrigin)
+                try await capture.start(filter: videoFilter,
+                                        audioOrigin: mode == .meeting ? audioCaptureManager.captureOrigin : ProcessInfo.processInfo.systemUptime,
+                                        archive: screenArchive)
             } catch {
                 meeting.videoError = error.localizedDescription
                 videoCapture = nil
+                screenSampler?.stop()
+                screenSampler = nil
+                if let screenSettingsObserver { NotificationCenter.default.removeObserver(screenSettingsObserver) }
+                screenSettingsObserver = nil
+                if mode == .screenOnly {
+                    modelContext.delete(meeting)
+                    throw error
+                }
             }
         }
 
@@ -484,7 +610,7 @@ final class RecordingManager {
 
         // Start transcription and the copilot loop
         transcriptionEngine.forceLocal = meeting.onDeviceOnly
-        transcriptionEngine.startTranscribing(meetingStartTime: .now)
+        if mode == .meeting { transcriptionEngine.startTranscribing(meetingStartTime: .now) }
         callAnalysisEngine.provider.resetUsage()  // this call's token meter starts at zero
         docMatcher.resetUsage()
         nudges.start(gauges: profile?.gauges ?? [])
@@ -503,6 +629,20 @@ final class RecordingManager {
                                  forceLocal: meeting.onDeviceOnly)
 
         currentMeeting = meeting
+        if screenSampler != nil {
+            let session = screenSession
+            callAnalysisEngine.screenDispatchAllowed = { [weak self, weak meeting] in
+                guard let self, let meeting, self.screenSession == session else { return false }
+                guard self.screenSignature(forceLocal: meeting.onDeviceOnly) == self.screenSettingsSignature,
+                      SwitchingAnalysisProvider.canSendScreenImages(forceLocal: meeting.onDeviceOnly) else {
+                    self.updateScreenPolicy(meeting: meeting, session: session)
+                    return false
+                }
+                return true
+            }
+            updateScreenPolicy(meeting: meeting, session: session)
+            observeScreenPrivacy(meeting: meeting, session: session)
+        }
         recordingStartTime = .now
         isRecording = true
         // The last call's "Call saved" sheet would cover this one; its
@@ -521,7 +661,7 @@ final class RecordingManager {
         // `liveSweepDelay`; the final post-call pass stays authoritative.
         liveAnchors = [:]
         liveSpeakerSuggestions = [:]
-        if UserDefaults.standard.bool(forKey: "liveSpeakerLabels") {
+        if mode == .meeting && UserDefaults.standard.bool(forKey: "liveSpeakerLabels") {
             liveSweepTask = Task { [weak self] in
                 while !Task.isCancelled {
                     let delay = Self.liveSweepDelay(power: .now)
@@ -539,6 +679,7 @@ final class RecordingManager {
             Task { @MainActor in
                 guard let self, let start = self.recordingStartTime else { return }
                 self.elapsedTime = Date.now.timeIntervalSince(start)
+                guard mode == .meeting else { return }
                 let clock = self.transcriptionEngine.speechClock()
                 self.nudges.tick(now: clock.now, lastHeard: clock.lastHeard, paused: self.callAnalysisEngine.isPaused)
                 if let voice = self.lastVoiceAt,
@@ -573,18 +714,34 @@ final class RecordingManager {
         // Capture stops first also so both .caf files are finalized before the
         // diarization task can read them.
         callAnalysisEngine.stop()
-        await audioCaptureManager.stopCapture()
+        screenSession = UUID()
+        screenSampler?.stop()
+        screenSampler = nil
+        if let screenSettingsObserver { NotificationCenter.default.removeObserver(screenSettingsObserver) }
+        screenSettingsObserver = nil
+        let screenOnly = currentMeeting?.sessionMode == .screenOnly
+        if !screenOnly { await audioCaptureManager.stopCapture() }
         if let capture = videoCapture, let meeting = currentMeeting {
             do {
-                let (url, offset) = try await capture.stop()
-                meeting.rawVideoPath = url.path
-                meeting.videoOffset = offset
-                await retryVideoMux(meeting)
+                if screenArchive {
+                    let (url, offset) = try await capture.stop()
+                    if screenOnly { meeting.videoPath = url.path }
+                    else {
+                        meeting.rawVideoPath = url.path
+                        meeting.videoOffset = offset
+                        await retryVideoMux(meeting)
+                    }
+                } else {
+                    try await capture.stopWatching()
+                }
             } catch VideoCaptureService.VideoError.partial(let url, let offset, let reason) {
-                meeting.rawVideoPath = url.path
-                meeting.videoOffset = offset
+                if screenOnly { meeting.videoPath = url.path }
+                else {
+                    meeting.rawVideoPath = url.path
+                    meeting.videoOffset = offset
+                    meeting.videoError = "Video stopped early. Retry to add audio to the saved portion."
+                }
                 meeting.videoWarning = reason
-                meeting.videoError = "Video stopped early. Retry to add audio to the saved portion."
             } catch {
                 meeting.videoError = error.localizedDescription
             }
@@ -593,7 +750,7 @@ final class RecordingManager {
 
         // Drain the transcription backlog so the call's final words land before
         // the transcript is assembled for the summary/coaching reports.
-        await transcriptionEngine.stopTranscribing()
+        if !screenOnly { await transcriptionEngine.stopTranscribing() }
         // onSegment persists segments via Task { @MainActor } hops; yield once so
         // the last enqueued addSegment jobs run before we read segments back.
         await Task.yield()
@@ -601,7 +758,7 @@ final class RecordingManager {
         // Update meeting
         if let meeting = currentMeeting {
             meeting.duration = elapsedTime
-            meeting.status = .processing
+            meeting.status = screenOnly ? .done : .processing
             let tone = nudges.stop()
             meeting.nudges = tone.nudges
             meeting.moodTimeline = tone.timeline
@@ -628,14 +785,14 @@ final class RecordingManager {
             liveAnchors = [:]
             // Read now: the next call resets it.
             let micHeardSpeakers = transcriptionEngine.micHearsSpeakers
-            chainsInFlight += 1
+            if !screenOnly { chainsInFlight += 1
             Task {
                 // A private meeting's report and after-call actions stay on
                 // this Mac; a call recording meanwhile is unaffected.
                 await CloudGate.$scopeLocal.withValue(meetingRef.onDeviceOnly) {
                     await self.runPostCallChain(meetingRef, anchors: anchors, micHeardSpeakers: micHeardSpeakers)
                 }
-            }
+            } }
             justFinished = meeting
         }
 
@@ -1561,11 +1718,13 @@ final class RecordingManager {
 
 enum RecordingError: LocalizedError {
     case modelNotReady
+    case screenAnalysisUnavailable
     case speakersNotDetected
 
     var errorDescription: String? {
         switch self {
         case .modelNotReady: "The speech model is still loading. Please wait."
+        case .screenAnalysisUnavailable: "Screen analysis is unavailable. Choose a vision-capable AI and review your privacy settings."
         case .speakersNotDetected: "Speaker detection didn't work this time. Try again."
         }
     }

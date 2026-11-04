@@ -35,9 +35,9 @@ final class CLIAnalysisProvider: AnalysisProvider {
         let schemaData = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
         let schemaText = String(decoding: schemaData, as: UTF8.self)
         let text = try await call(system: system + "\nReturn only a JSON object matching this schema: " + schemaText,
-                                  user: ClaudeAnalysisProvider.analysisUserContent(request), schema: schemaText)
+                                  user: ClaudeAnalysisProvider.analysisUserContent(request), schema: schemaText, jpeg: request.screenContext?.jpeg)
         let parsed = try ClaudeAnalysisProvider.parseAnalysisPayload(text)
-        let sources = ClaudeAnalysisProvider.validatingSources(parsed.insights, knownDocuments: request.knownDocumentNames)
+        let sources = ClaudeAnalysisProvider.validatingSources(parsed.insights, knownDocuments: request.knownDocumentNames + ClaudeAnalysisProvider.screenSources(request))
         let kinds = ClaudeAnalysisProvider.validatingKinds(sources, allowed: Set(request.kinds.map(\.key)))
         return AnalysisResult(insights: kinds, sentiment: parsed.sentiment, read: parsed.read,
                               coach: parsed.coach, resolved: parsed.resolved)
@@ -61,14 +61,15 @@ final class CLIAnalysisProvider: AnalysisProvider {
         try await call(system: system, user: user)
     }
 
-    private func call(system: String, user: String, schema: String? = nil) async throws -> String {
+    private func call(system: String, user: String, schema: String? = nil, jpeg: Data? = nil) async throws -> String {
         let kind = kindSource()
         let executable = Self.executable(kind)
         var arguments: [String]
         switch kind {
         case .claudeCode:
-            arguments = ["--print", "--output-format", "json", "--tools", "", "--safe-mode", "--strict-mcp-config",
+            arguments = ["--print", "--output-format", jpeg == nil ? "json" : "stream-json", "--tools", "", "--safe-mode", "--strict-mcp-config",
                          "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--permission-prompts", "none"]
+            if jpeg != nil { arguments += ["--input-format", "stream-json", "--verbose"] }
             if let schema { arguments += ["--json-schema", schema] }
             let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty { arguments += ["--model", model] }
@@ -103,9 +104,15 @@ final class CLIAnalysisProvider: AnalysisProvider {
         }
         guard !executable.isEmpty else { throw AnalysisError.badResponse("Set the CLI executable path in Settings.") }
         let identifier = UUID().uuidString
-        let payload: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
+        var payload: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
                                       "arguments": arguments, "input": "\(system)\n\n\(user)", "timeout": 90.0,
                                       "preset": kind.rawValue]
+        if let jpeg {
+            guard [.claudeCode, .codex, .copilot].contains(kind), ScreenContext.validateJPEG(jpeg) else {
+                throw AnalysisError.badResponse("This CLI cannot accept the selected screen image.")
+            }
+            payload["jpeg"] = jpeg.base64EncodedString()
+        }
         let response = try await HostHelperClient.shared.perform(JSONSerialization.data(withJSONObject: payload), identifier: identifier)
         let text: String
         if kind == .claudeCode {

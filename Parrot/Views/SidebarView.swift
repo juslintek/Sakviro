@@ -44,7 +44,7 @@ struct SidebarView: View {
                     page = .dashboard
                     selectedMeeting = nil
                 }
-                NavRow(title: "Ask Parrot", icon: "sparkles", selected: page == .ask, beta: true) {
+                NavRow(title: "Ask \(MeetingActions.appName)", icon: "sparkles", selected: page == .ask, beta: true) {
                     page = .ask
                 }
                 .help("Ask anything about your past calls (⌘K)")

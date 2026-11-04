@@ -278,3 +278,15 @@ Groq transcription, language auto.
    Settings → Transcription → Language → English.
 5. **Trigger words.** A question needs two content words to open the fast
    lane; "Really?", "How are you?" and "Is it extra?" no longer do.
+
+
+## Language identification and screen sampling research (2026-11-04)
+
+These measurements are exploratory, on one M5 Max with 36 GB RAM and macOS 27. They are not app-wide CPU or memory savings, or evidence of accuracy on real conversations.
+
+- The Ąžuolas MLX process took 7.486 s to load TTS and 3.805 s on its first decode. Two warm decodes took 0.464 and 0.473 s. The process was cold; disk cache and GPU memory were not measured.
+- Apple's text language recognizer labeled Lithuanian as Slovak (0.909). Tiny language identification mislabeled three Lithuanian speech passages, while English scored 0.98–0.99. LayaML's 644 MB weights took 7.35 s cold and 259 ms for a warm batch of seven; its Lithuanian result abstained at 0.429. These results do not justify automatic routing.
+- fastText loaded in 7.6–9.1 ms and averaged 0.076–0.089 ms per text across three runs. Its whole Python process used 42.7 MB RSS. A mixed Lithuanian and English text was labeled Lithuanian with 0.978 confidence, so it cannot decide speech routing alone.
+- SpeechBrain VoxLingua107 required about 532 MB of isolated dependencies plus a 97 MB model, reached 619 MB RSS, and took 17.09 s for cold imports. Model loading took 0.108 s, the first call 63 ms and warm 3–10 second clips 20–54 ms. Synthetic Lithuanian and English passages classified correctly, but mixed speech, silence and short words produced unreliable results. VAD, minimum speech, hysteresis and real human recordings would need validation before use.
+
+The app keeps manual speech model selection. It reuses one ScreenCaptureKit stream and samples changed frames with a bounded pending slot; this avoids adding an always-running OCR or local vision model. The sampler check exercises unchanged frames, small changes, a pending frame, pause, resume and invalidation.

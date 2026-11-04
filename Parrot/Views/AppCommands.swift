@@ -102,6 +102,10 @@ enum MeetingActions {
         if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
     }
 
+    static var appName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Parrot"
+    }
+
     static func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [
@@ -142,7 +146,7 @@ struct ParrotCommands: Commands {
     var body: some Commands {
         // Parrot menu: custom About + a path to the next release.
         CommandGroup(replacing: .appInfo) {
-            Button("About Parrot") { MeetingActions.showAbout() }
+            Button("About \(MeetingActions.appName)") { MeetingActions.showAbout() }
             #if !PARROT_NO_UPDATER
             if AppUpdater.shared.isAvailable {
                 Button("Check for Updates…") {
@@ -191,7 +195,7 @@ struct ParrotCommands: Commands {
             }
             .keyboardShortcut("f")
 
-            Button("Ask Parrot…") {
+            Button("Ask \(MeetingActions.appName)…") {
                 session.askRequest = AppSession.AskRequest(scope: nil, scopeTitle: nil)
             }
             .keyboardShortcut("k")

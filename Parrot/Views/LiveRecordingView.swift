@@ -41,11 +41,18 @@ struct LiveRecordingView: View {
             Divider()
 
             // Audio waveform
+            if recordingManager.currentMeeting?.sessionMode != .screenOnly {
             AudioWaveformView(level: recordingManager.audioCaptureManager.audioLevel)
                 .frame(height: 40)
                 .padding(.horizontal, Theme.Metrics.pad)
 
             deviceBar
+            } else if let warning = recordingManager.currentMeeting?.videoWarning ?? recordingManager.currentMeeting?.videoError {
+                Text(warning)
+                    .font(Theme.Typography.secondary)
+                    .foregroundStyle(Theme.Colors.ink2)
+                    .padding(Theme.Metrics.pad)
+            }
 
             Divider()
 
@@ -89,9 +96,15 @@ struct LiveRecordingView: View {
                     .fill(Theme.Colors.stop)
                     .frame(width: 10, height: 10)
 
-                Text("Recording")
+                Text(recordingManager.currentMeeting?.sessionMode == .screenOnly ? "Watching screen" : "Recording")
                     .font(.appHeadline)
                     .foregroundStyle(Theme.Colors.stop)
+            }
+
+            if recordingManager.isWatchingSelectedWindow {
+                Label("Selected window", systemImage: "macwindow")
+                    .font(Theme.Typography.secondary)
+                    .foregroundStyle(Theme.Colors.ink2)
             }
 
             Spacer()
@@ -102,11 +115,13 @@ struct LiveRecordingView: View {
 
             Spacer()
 
+            if recordingManager.currentMeeting?.sessionMode != .screenOnly {
             consentButton
                 .padding(.trailing, Theme.Metrics.controlGap)
 
             muteButton
                 .padding(.trailing, Theme.Metrics.controlGap)
+            }
 
             markButton
                 .padding(.trailing, Theme.Metrics.controlGap)
@@ -293,7 +308,7 @@ struct LiveRecordingView: View {
                 .lineLimit(1)
             MicLevelView(level: cap.micLevel)
             if let error = recordingManager.currentMeeting?.videoWarning ?? recordingManager.currentMeeting?.videoError {
-                Label("Video stopped: \(error)", systemImage: "exclamationmark.triangle.fill")
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.appCaption2)
                     .foregroundStyle(Theme.Colors.warn)
             }

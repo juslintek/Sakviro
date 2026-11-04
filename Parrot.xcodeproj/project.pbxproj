@@ -46,6 +46,7 @@
 		30018274E62D128CD5233AAD /* ToneTimelineCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A60565D06DBC8D3E7302B6E /* ToneTimelineCard.swift */; };
 		30B04505271738717D6DA723 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = B183BFF50A64553D38338843 /* WhatsNew.swift */; };
 		30D6A15542D82FADBE00F8E6 /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 263CE93170FACBDB3C000E58 /* WhatsNewCard.swift */; };
+		312BF12105DF5C40DB413C13 /* ScreenContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157CF80685AD368EB04E1666 /* ScreenContext.swift */; };
 		31EBD53900CB031ED0BE2965 /* RecordingManager+Memory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6989DE6ECCCBD00280F1138 /* RecordingManager+Memory.swift */; };
 		33388C762DC6F8146FEB8913 /* KnowledgeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503BC6AC7CF52171008D5415 /* KnowledgeSettingsView.swift */; };
 		380525791BF03BA5FAB10711 /* ReportContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72A118B3116F40C4BA68FCB /* ReportContentView.swift */; };
@@ -119,6 +120,7 @@
 		C432FA5BE959BA38FC8EBBE3 /* Nudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93BEABF1221B4FBD189CBAC1 /* Nudge.swift */; };
 		C4C6D8CA6E20C2DF78297A3D /* AskPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEA285A53B90E773AB9041BB /* AskPageView.swift */; };
 		C4E712FA97C29A627BAA71D4 /* ReportPDFHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61C50A20D9A27B0194617CF6 /* ReportPDFHarness.swift */; };
+		C78463F93D14C5F8E0A00E0B /* VisionCaptureHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06157B5A504452C6CE974D64 /* VisionCaptureHarness.swift */; };
 		C8002A3F47345F064BB3BA98 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C63A84D1204A30379B79627C /* ContentView.swift */; };
 		C8804B03958954B9D8BEA6FA /* LiveRecordingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DC1D58E1A4501FB741B72EE /* LiveRecordingView.swift */; };
 		CA04CD03D1984D423A72F43C /* AppCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A129CC78DBEDB4ED47998A /* AppCommands.swift */; };
@@ -203,6 +205,7 @@
 /* Begin PBXFileReference section */
 		00A832C673EC418D31C8E054 /* ProfileFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileFile.swift; sourceTree = "<group>"; };
 		04253CBD6575607A1D88BFA5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		06157B5A504452C6CE974D64 /* VisionCaptureHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionCaptureHarness.swift; sourceTree = "<group>"; };
 		09FD0006B2D617872DB79534 /* CopilotPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotPanelView.swift; sourceTree = "<group>"; };
 		0C67B422ED0942D15799C271 /* ModelDownloadProgressView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDownloadProgressView.swift; sourceTree = "<group>"; };
 		101B6FC684BE64ED1CD0646E /* MCPBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPBundle.swift; sourceTree = "<group>"; };
@@ -210,6 +213,7 @@
 		12CCB6300E538C4078B672BA /* ParrotHostHelper.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = ParrotHostHelper.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 		13EF1D9A73713BD2D3A031F4 /* Outfit-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Outfit-LICENSE.txt"; sourceTree = "<group>"; };
 		1577C199CA71C3F1A4B975B6 /* ConnectionsPrivacySettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsPrivacySettings.swift; sourceTree = "<group>"; };
+		157CF80685AD368EB04E1666 /* ScreenContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenContext.swift; sourceTree = "<group>"; };
 		1704E074D71337C87B711A22 /* Consent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Consent.swift; sourceTree = "<group>"; };
 		174EB3CD17618DB5EDD3FB75 /* ProfileTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileTest.swift; sourceTree = "<group>"; };
 		176368DAE6DF0C018FF9BE39 /* ProfileShareViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileShareViews.swift; sourceTree = "<group>"; };
@@ -441,6 +445,7 @@
 				2CE74071DA1946404F9FD84C /* SnapshotTool.swift */,
 				604C468031E1D070D97B0AFA /* ToneHarness.swift */,
 				D2962A655A64EEB76543116E /* VideoCaptureTest.swift */,
+				06157B5A504452C6CE974D64 /* VisionCaptureHarness.swift */,
 				2669E4B05CF7143D2D0619E6 /* Fonts */,
 				2ADBF338BD8E72F5B190A918 /* Models */,
 				8C97C45FDD11ECCB2EB879B9 /* Services */,
@@ -587,6 +592,7 @@
 				84AC5D75FB25B8E500AC9F4F /* ReportPDF.swift */,
 				F256E7CD5385DC7847C06FE8 /* ReportTemplate.swift */,
 				686FBA4D042AA829CA0B3E63 /* Retention.swift */,
+				157CF80685AD368EB04E1666 /* ScreenContext.swift */,
 				E9C31F6241DC0212DCA504AE /* SpeakerProfileStore.swift */,
 				255C0CD2B2A2E0FBA9F94EEE /* SystemAudioTap.swift */,
 				ADAE039E9922CFEDDA6B2BBD /* ToneTimeline.swift */,
@@ -912,6 +918,7 @@
 				F485BCD6B87CCC2844A9EFB1 /* ReportTemplate.swift in Sources */,
 				923C2C8116661967A654EB75 /* Retention.swift in Sources */,
 				060AB5AF5A76B5D7285CDCC4 /* RewriteReportSheet.swift in Sources */,
+				312BF12105DF5C40DB413C13 /* ScreenContext.swift in Sources */,
 				1D4BBB5AC90C7DF3C6401C2A /* SentimentStripView.swift in Sources */,
 				87D4EA1B8A3F82F7409E095A /* SettingsCards.swift in Sources */,
 				542440B7C1D44E7FB9D30E78 /* SettingsView.swift in Sources */,
@@ -930,6 +937,7 @@
 				CC22CC7B3CBD14D2B4606E16 /* TranscriptionEngine.swift in Sources */,
 				082809FD97C59B2DFA26CFEC /* VideoCaptureService.swift in Sources */,
 				C28611C2E5FF8E58105FA734 /* VideoCaptureTest.swift in Sources */,
+				C78463F93D14C5F8E0A00E0B /* VisionCaptureHarness.swift in Sources */,
 				F06D20623CE0F9F52146A450 /* WelcomeStep.swift in Sources */,
 				30B04505271738717D6DA723 /* WhatsNew.swift in Sources */,
 				30D6A15542D82FADBE00F8E6 /* WhatsNewCard.swift in Sources */,
