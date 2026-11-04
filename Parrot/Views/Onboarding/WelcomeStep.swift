@@ -4,9 +4,10 @@ struct WelcomeStep: View {
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
-            Image(systemName: "bird")
-                .font(.system(size: 64))
-                .foregroundStyle(Theme.Colors.accent)
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 80, height: 80)
             Text("Meet \(MeetingActions.appName)")
                 .font(.appLargeTitle)
                 .fontWeight(.bold)
