@@ -74,6 +74,11 @@ struct ParrotMain {
             VideoCaptureTest.run()
             return
         }
+        if let i = args.firstIndex(of: "--vision-capture-test") {
+            let provider = i + 1 < args.count ? args[i + 1] : "codex"
+            MainActor.assumeIsolated { VisionCaptureHarness.run(providerName: provider) }
+            return
+        }
         if let i = args.firstIndex(of: "--project-context-test"), i + 1 < args.count {
             MainActor.assumeIsolated { ProjectContextHarness.run(providerName: args[i + 1]) }
             return

@@ -15,6 +15,7 @@ struct DashboardView: View {
 
     @State private var errorMessage: String?
     @State private var showImporter = false
+    @State private var screenMode: SessionMode?
     @AppStorage("copilotEnabled") private var copilotEnabled = false
     /// The same setting as Settings → Transcription → Language and the live
     /// "switch to Turkish" banner, shown where a recording starts.
@@ -64,6 +65,26 @@ struct DashboardView: View {
                 Text(errorMessage)
             }
         }
+        .confirmationDialog("Send selected window frames to your chosen AI?", isPresented: Binding(
+            get: { screenMode != nil }, set: { if !$0 { screenMode = nil } }
+        ), titleVisibility: .visible) {
+            Button("Choose window") {
+                let mode = screenMode
+                screenMode = nil
+                Task {
+                    do {
+                        if mode == .screenOnly {
+                            try await recordingManager.startRecording(modelContext: modelContext, mode: .screenOnly, useScreen: true)
+                        } else {
+                            try await recordingManager.preflightPermissionsAndStart(modelContext: modelContext, useScreen: true)
+                        }
+                    } catch { errorMessage = error.localizedDescription }
+                }
+            }
+            Button("Cancel", role: .cancel) { screenMode = nil }
+        } message: {
+            Text("Frames may be sent to your chosen AI provider. Privacy settings can pause screen analysis.")
+        }
     }
 
     // MARK: - Record Button
@@ -96,6 +117,11 @@ struct DashboardView: View {
             Text("Captures system audio + your mic, transcribed on-device.")
                 .font(Theme.Typography.secondary)
                 .foregroundStyle(Theme.Colors.ink2)
+
+            Button("Watch screen only") { screenMode = .screenOnly }
+                .disabled(recordingManager.isRecording || !copilotEnabled)
+            Button("Record meeting with screen analysis") { screenMode = .meeting }
+                .disabled(recordingManager.isRecording || !copilotEnabled || !recordingManager.transcriptionEngine.isReady)
 
             languagePicker
 

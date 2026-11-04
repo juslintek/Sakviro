@@ -32,6 +32,12 @@ struct OnboardingView: View {
                         .buttonStyle(.plain)
                 }
                 Spacer()
+                if model.step == .permissions {
+                    Button("Use screen only") {
+                        model.finish()
+                        isPresented = false
+                    }
+                }
                 HStack(spacing: 6) {
                     ForEach(model.steps, id: \.self) { step in
                         Circle()

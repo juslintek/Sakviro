@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import Darwin
 
 @main struct HostCLIServiceCheck {
@@ -41,6 +43,33 @@ import Darwin
             let message = run(request).1 ?? ""
             precondition(message.contains(expected) && !message.contains("private-value"))
         }
+        let pixels = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+                               space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        pixels.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        pixels.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        let jpeg = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(jpeg, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, pixels.makeImage()!, nil)
+        precondition(CGImageDestinationFinalize(destination))
+        let checkAttachment = "import sys,os,stat; p=sys.argv[-2]; assert sys.argv[-3]=='--image' and sys.argv[-1]=='-'; assert stat.S_IMODE(os.stat(p).st_mode)==0o600 and stat.S_IMODE(os.stat(os.path.dirname(p)).st_mode)==0o700; assert open(p,'rb').read(2)==b'\\xff\\xd8'; print(p)"
+        let attachmentRequest = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/usr/bin/python3",
+            "arguments": ["-c", checkAttachment, "-"], "input": "", "timeout": 3, "preset": "codex", "jpeg": (jpeg as Data).base64EncodedString()])
+        let attachmentResult = run(attachmentRequest)
+        let attachmentPath = String(data: attachmentResult.0 ?? Data(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        precondition(!attachmentPath.isEmpty && !FileManager.default.fileExists(atPath: attachmentPath), attachmentResult.1 ?? "attachment failed")
+        let claudeInput = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/bin/cat",
+            "arguments": [], "input": "synthetic prompt", "timeout": 3, "preset": "claudeCode", "jpeg": (jpeg as Data).base64EncodedString()])
+        let claudeOutput = run(claudeInput)
+        let envelope = try JSONSerialization.jsonObject(with: claudeOutput.0 ?? Data()) as? [String: Any]
+        let message = envelope?["message"] as? [String: Any]
+        let content = message?["content"] as? [[String: Any]]
+        let image = content?.first?["source"] as? [String: Any]
+        precondition(envelope?["type"] as? String == "user" && message?["role"] as? String == "user")
+        precondition(image?["media_type"] as? String == "image/jpeg" && image?["data"] as? String == (jpeg as Data).base64EncodedString())
+        precondition(content?.last?["text"] as? String == "synthetic prompt", claudeOutput.1 ?? "Claude input failed")
+        let invalidJPEG = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/bin/echo",
+            "arguments": ["-"], "input": "", "timeout": 3, "preset": "codex", "jpeg": Data("not an image".utf8).base64EncodedString()])
+        precondition(run(invalidJPEG).1 == "Invalid screen JPEG.")
         let invalidArgument = run(try request("/bin/echo", ["bad\0argument"], "", 3))
         precondition(invalidArgument.0 == nil)
         let timeout = run(try request("/bin/sleep", ["10"], "", 1))

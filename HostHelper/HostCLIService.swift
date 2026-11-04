@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import Darwin
 
 final class HostCLIService {
@@ -17,7 +18,7 @@ final class HostCLIService {
     }
 
     func perform(_ request: Data, reply: @escaping (Data?, String?) -> Void) {
-        guard let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+        guard request.count <= 1_750_000, let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
               let identifier = object["id"] as? String, UUID(uuidString: identifier) != nil else {
             reply(nil, "Invalid CLI configuration or executable not found.")
             return
@@ -70,7 +71,40 @@ final class HostCLIService {
         let timeout = min(max(object["timeout"] as? Double ?? 90, 1), 300)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("parrot-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let outcome = Result { () throws -> Data in
+        var processArguments = arguments
+        var processInput = input
+        if let encoded = object["jpeg"] {
+            guard let base64 = encoded as? String, base64.utf8.count <= 682_668,
+                  let jpeg = Data(base64Encoded: base64), !jpeg.isEmpty, jpeg.count <= 512_000,
+                  let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+                  CGImageSourceGetCount(source) == 1,
+                  CGImageSourceGetType(source) as String? == "public.jpeg",
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  width > 0, height > 0, width <= 4096, height <= 4096,
+                  CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+                throw failure("Invalid screen JPEG.")
+            }
+            switch object["preset"] as? String {
+            case "claudeCode":
+                let message: [String: Any] = ["type": "user", "message": ["role": "user", "content": [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64]],
+                    ["type": "text", "text": input]]], "parent_tool_use_id": NSNull()]
+                processInput = String(decoding: try JSONSerialization.data(withJSONObject: message), as: UTF8.self) + "\n"
+            case "codex", "copilot":
+                let attachment = directory.appendingPathComponent("screen.jpg")
+                guard FileManager.default.createFile(atPath: attachment.path, contents: jpeg, attributes: [.posixPermissions: 0o600]) else {
+                    throw failure("Could not prepare screen attachment.")
+                }
+                if object["preset"] as? String == "codex" {
+                    guard processArguments.last == "-" else { throw failure("Invalid Codex attachment configuration.") }
+                    processArguments.insert(contentsOf: ["--image", attachment.path], at: processArguments.count - 1)
+                } else { processArguments += ["--attachment", attachment.path] }
+            default: throw failure("This CLI cannot accept screen images.")
+            }
+        }
         var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
         guard pipe(&inputPipe) == 0, pipe(&outputPipe) == 0, pipe(&errorPipe) == 0 else { throw failure("Could not create CLI pipes.") }
         var actions: posix_spawn_file_actions_t?
@@ -89,7 +123,6 @@ final class HostCLIService {
             for fd in inputPipe + outputPipe + errorPipe { close(fd) }
             throw failure("Could not prepare the CLI process.")
         }
-        var processArguments = arguments
         if object["preset"] as? String == "gemini" {
             let isolatedConfig = directory.appendingPathComponent(".gemini")
             try FileManager.default.createDirectory(at: isolatedConfig, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -139,6 +172,7 @@ final class HostCLIService {
         if wasCancelled { kill(-pid, SIGKILL) }
         let group = DispatchGroup()
         let state = OutputState()
+        let stdinBytes = Array(processInput.utf8)
         for (fd, isError) in [(outputPipe[0], false), (errorPipe[0], true)] {
             group.enter()
             DispatchQueue.global(qos: .utility).async {
@@ -154,8 +188,7 @@ final class HostCLIService {
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             defer { close(inputPipe[1]); group.leave() }
-            let bytes = Array(input.utf8)
-            bytes.withUnsafeBytes { ptr in
+            stdinBytes.withUnsafeBytes { ptr in
                 var offset = 0
                 while offset < ptr.count {
                     let written = write(inputPipe[1], ptr.baseAddress!.advanced(by: offset), ptr.count - offset)
@@ -192,6 +225,10 @@ final class HostCLIService {
             throw failure("CLI failed. Check its sign-in and configuration.")
         }
         return state.output
+        }
+        do { try FileManager.default.removeItem(at: directory) }
+        catch { throw failure("Could not remove the temporary CLI attachment directory.") }
+        return try outcome.get()
     }
 
     private func failure(_ text: String) -> NSError {

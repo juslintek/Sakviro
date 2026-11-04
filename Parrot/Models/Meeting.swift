@@ -8,6 +8,10 @@ enum MeetingStatus: String, Codable {
     case failed
 }
 
+enum SessionMode: String, Codable {
+    case meeting, screenOnly
+}
+
 /// What a "Rewrite Report" replaced: enough to put it back exactly.
 struct PreviousReport: Codable, Equatable {
     var summary: String?
@@ -29,6 +33,7 @@ final class Meeting {
     var videoOffset: TimeInterval = 0
     var videoError: String? = nil
     var videoWarning: String? = nil
+    var sessionMode: SessionMode = SessionMode.meeting
     var status: MeetingStatus
     var errorMessage: String?
     /// AI-generated post-call report; set shortly after recording stops.

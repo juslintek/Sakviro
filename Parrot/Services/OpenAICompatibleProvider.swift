@@ -206,7 +206,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
                                             schema: schemaObj, maxTokens: 1024, config: config)
         let parsed = try ClaudeAnalysisProvider.parseAnalysisPayload(text)
         let sourceValidated = ClaudeAnalysisProvider.validatingSources(
-            parsed.insights, knownDocuments: request.knownDocumentNames)
+            parsed.insights, knownDocuments: request.knownDocumentNames + ClaudeAnalysisProvider.screenSources(request))
         let kindValidated = ClaudeAnalysisProvider.validatingKinds(
             sourceValidated, allowed: Set(request.kinds.map(\.key)))
         return AnalysisResult(insights: kindValidated, sentiment: parsed.sentiment,
@@ -564,7 +564,24 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     // as placeholders, real values back in the answer. Ollama gets the text
     // as is — it never leaves the Mac.
 
-    func analyze(_ request: AnalysisRequest) async throws -> AnalysisResult {
+    static func canSendScreenImages(forceLocal: Bool = false) -> Bool {
+        !forceLocal && !CloudGate.forcesLocal && !Redactor.isEnabled && [.claude, .claudeCode, .codex, .copilot].contains(liveKind)
+    }
+
+    func analyze(_ original: AnalysisRequest) async throws -> AnalysisResult {
+        var request = original
+        if var screen = request.screenContext {
+            screen.text = String(screen.text.prefix(4000))
+            screen.sourceLabel = "Selected screen"
+            if let jpeg = screen.jpeg, !ScreenContext.validateJPEG(jpeg) {
+                throw AnalysisError.badResponse("Invalid screen JPEG.")
+            }
+            if !Self.canSendScreenImages(forceLocal: request.forceLocal) { screen.jpeg = nil }
+            guard screen.jpeg != nil || !screen.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AnalysisError.badResponse("This provider cannot receive screen images and no screen text was available.")
+            }
+            request.screenContext = screen
+        }
         if request.forceLocal || CloudGate.forcesLocal {
             return try await localCompat.analyze(request)
         }
@@ -574,7 +591,13 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
         if request.previousCallIsPrivate { outgoing.previousCallContext = "" }
         guard Redactor.isEnabled else { return try await liveProvider.analyze(outgoing) }
         var redactor = Redactor()
-        let result = try await liveProvider.analyze(redactor.redact(outgoing))
+        var redacted = redactor.redact(outgoing)
+        if var screen = outgoing.screenContext {
+            screen.jpeg = nil
+            screen.text = redactor.redact(screen.text)
+            redacted.screenContext = screen
+        }
+        let result = try await liveProvider.analyze(redacted)
         return redactor.restore(result)
     }
 

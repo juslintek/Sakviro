@@ -7,7 +7,7 @@ struct WelcomeStep: View {
             Image(systemName: "bird")
                 .font(.system(size: 64))
                 .foregroundStyle(Theme.Colors.accent)
-            Text("Meet Parrot")
+            Text("Meet \(MeetingActions.appName)")
                 .font(.appLargeTitle)
                 .fontWeight(.bold)
             Text("Records your calls, writes everything down,\nand helps you live while you talk.")

@@ -116,6 +116,7 @@ bundle: build
 	@plutil -replace CFBundleExecutable         -string Parrot           $(PLIST)
 	@plutil -replace CFBundleIdentifier         -string $(BUNDLE_ID) $(PLIST)
 	@plutil -replace CFBundleName               -string "$(DISPLAY_NAME)" $(PLIST)
+	@plutil -insert CFBundleDisplayName          -string "$(DISPLAY_NAME)" $(PLIST)
 	@plutil -replace CFBundleDevelopmentRegion  -string en               $(PLIST)
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)"     $(PLIST)
 	@plutil -replace CFBundleVersion            -string "$(BUILD_NUM)"   $(PLIST)
