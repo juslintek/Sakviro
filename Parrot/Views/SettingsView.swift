@@ -63,6 +63,7 @@ struct SettingsView: View {
     @AppStorage("reportsProvider") private var reportsProvider = ""
     /// "" = same backend as reports.
     @AppStorage("askProvider") private var askProvider = ""
+    @AppStorage(ClaudeAnalysisProvider.modelKey) private var claudeModel = ""
     @AppStorage("copilotOllamaModel") private var copilotOllamaModel = "llama3.2:3b"
     @AppStorage("copilotCustomBaseURL") private var copilotCustomBaseURL = ""
     @AppStorage("copilotCustomModel") private var copilotCustomModel = ""
@@ -710,6 +711,7 @@ struct SettingsView: View {
             SettingsLabeledRow(title: "Claude", detail: "Best quality. Needs a key. Transcript text is sent, audio never.") {
                 Button("Open API Keys") { section = .apiKeys }
             }
+            ProviderModelSettings(model: $claudeModel, kind: .claude)
             SettingsRow {
                 Hint("Optional: add a TypeSafe key to show matching excerpts from your documents within a second of a question.")
             }
@@ -765,7 +767,7 @@ struct SettingsView: View {
                 )
             }
         case .claudeCode, .codex, .gemini, .copilot, .customCLI:
-            CLIProviderSettings(kind: kind)
+            CLIProviderSettings(kind: kind).id(kind)
         }
     }
 

@@ -684,7 +684,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// Live bucket: model/provider label + tokens. When both roles share one
     /// instance this is the COMBINED bucket and `reportsUsage` is nil.
     var liveUsage: (model: String, provider: String, totals: AITokenTotals) {
-        (CopilotProviderKind.modelName(for: Self.liveKind),
+        (Self.liveKind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((liveProvider as? CLIAnalysisProvider)?.usageModel ?? CopilotProviderKind.modelName(for: Self.liveKind)),
          Self.liveKind.rawValue,
          liveProvider.usageTotals)
     }
@@ -693,7 +693,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     var reportsUsage: (model: String, provider: String, totals: AITokenTotals)? {
         guard !rolesShareInstance else { return nil }
         let kind = Self.reportsKind
-        return (CopilotProviderKind.modelName(for: kind),
+        return (kind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((reportsProvider as? CLIAnalysisProvider)?.usageModel ?? CopilotProviderKind.modelName(for: kind)),
                 kind.rawValue,
                 reportsProvider.usageTotals)
     }

@@ -501,7 +501,7 @@ struct MeetingDetailView: View {
                     .fontWeight(.medium)
                     .foregroundStyle(Theme.Colors.ink)
                 Text(usage.costBreakdown()
-                    .map { "\($0.label) \($0.priced ? AIUsage.formatUSD($0.usd) : "account usage not tracked")" }
+                    .map { "\($0.label) \($0.priced ? AIUsage.formatUSD($0.usd) : "cost not tracked")" }
                     .joined(separator: " · "))
                     .foregroundStyle(Theme.Colors.ink2)
                     .lineLimit(1)
@@ -537,7 +537,7 @@ struct MeetingDetailView: View {
             }
             Divider()
             HStack {
-                Text("Total").font(Theme.Typography.secondary.weight(.semibold))
+                Text(usage.costBreakdown().contains { !$0.priced } ? "Total (partial)" : "Total").font(Theme.Typography.secondary.weight(.semibold))
                 Spacer()
                 Text(AIUsage.formatUSD(usage.totalUSD))
                     .font(Theme.Typography.mono(11, .semibold))

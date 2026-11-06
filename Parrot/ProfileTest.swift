@@ -155,6 +155,41 @@ enum ProfileTest {
     }
 
     private static func testCLIResponses() {
+        let suite = "parrot-provider-model-test-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        check("Claude default model", ClaudeAnalysisProvider.selectedModel(defaults) == ClaudeAnalysisProvider.defaultModel)
+        defaults.set("custom-model", forKey: ClaudeAnalysisProvider.modelKey)
+        defaults.set("model-a", forKey: "cli_codex_model")
+        defaults.set("model-b", forKey: "cli_gemini_model")
+        check("Claude selected model", ClaudeAnalysisProvider.selectedModel(defaults) == "custom-model")
+        let body = (try? ClaudeAnalysisProvider.requestBody(["messages": []], model: ClaudeAnalysisProvider.selectedModel(defaults)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        check("Claude request sends selected model", body?["model"] as? String == "custom-model")
+        let claude = ClaudeAnalysisProvider()
+        let tokenUsage = Data(#"{"usage":{"input_tokens":1,"output_tokens":1}}"#.utf8)
+        claude.recordUsage(from: tokenUsage, model: ClaudeAnalysisProvider.defaultModel)
+        claude.recordUsage(from: tokenUsage, model: "custom-model")
+        check("Mixed Claude models are identified", claude.usageModel == "Multiple models")
+        claude.resetUsage()
+        check("Claude model tracking resets", claude.usageModel == nil)
+        check("CLI models stay separate", CLIAnalysisProvider.setting(.codex, "model", defaults: defaults) == "model-a" && CLIAnalysisProvider.setting(.gemini, "model", defaults: defaults) == "model-b")
+        let cli = CLIAnalysisProvider { .codex }
+        let sentModel = CLIAnalysisProvider.setting(.codex, "model", defaults: defaults)
+        defaults.set("model-changed", forKey: "cli_codex_model")
+        cli.recordCall(kind: .codex, model: sentModel)
+        check("CLI usage records sent model", cli.usageModel == "model-a")
+        cli.recordCall(kind: .codex, model: "")
+        check("CLI mixed models are identified", cli.usageModel == "Multiple models")
+        cli.resetUsage()
+        cli.recordCall(kind: .codex, model: "")
+        check("CLI default model is identified", cli.usageModel == "Codex CLI (default)")
+        cli.resetUsage()
+        check("CLI model tracking resets", cli.usageModel == nil)
+        check("Custom CLI model is one argument", (try? CLIAnalysisProvider.customArguments(["--model", "{model}"], model: "name with spaces;$(x)")) == ["--model", "name with spaces;$(x)"])
+        check("Custom CLI model cannot be a command flag", (try? CLIAnalysisProvider.customArguments(["{model}"], model: "-c")) == nil)
+        check("Custom CLI missing placeholder rejected", (try? CLIAnalysisProvider.customArguments([], model: "model")) == nil)
+        check("Custom CLI empty model rejected", (try? CLIAnalysisProvider.customArguments(["--model", "{model}"], model: "")) == nil)
         func answer(_ json: String) -> String? { try? CLIAnalysisProvider.claudeAnswer(Data(json.utf8)) }
         check("CLI result object", answer("{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\"}") == "hello")
         check("CLI result array", answer("[{\"type\":\"system\"},{\"type\":\"result\",\"is_error\":false,\"result\":\"hello\"}]") == "hello")
@@ -950,6 +985,11 @@ enum ProfileTest {
         usage.transcriptionTracks = 2
         usage.polishSeconds = 1200
 
+        var otherModel = usage
+        otherModel.copilotModel = "claude-sonnet-custom"
+        check("other Claude model rates unknown", otherModel.costBreakdown().first?.priced == false)
+        otherModel.copilotProvider = "custom"
+        check("custom API model rates unknown", otherModel.costBreakdown().first?.priced == false)
         let items = usage.costBreakdown()
         check("cost has 3 line items", items.count == 3)
         check("copilot cost $2.00", abs(items[0].usd - 2.00) < 0.0001)

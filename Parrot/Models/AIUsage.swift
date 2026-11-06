@@ -129,10 +129,12 @@ struct AIUsage: Codable {
             // Runs on this Mac — the whole point.
             return LineItem(label: "\(prefix) \(model) — local", detail: tokens, usd: 0)
         case "custom":
-            // Rates for arbitrary servers aren't tracked; show tokens, claim $0.
             return LineItem(label: "\(prefix) \(model)",
-                            detail: tokens + " · rates not tracked", usd: 0)
+                            detail: tokens + " · rates not tracked", usd: 0, priced: false)
         default:
+            guard model == ClaudeAnalysisProvider.defaultModel else {
+                return LineItem(label: "\(prefix) \(model)", detail: tokens + " · rates not tracked", usd: 0, priced: false)
+            }
             // Claude (nil = meetings recorded before provider selection).
             let usd = Double(totals.inputTokens) / 1_000_000 * AIPricing.haikuInputUSDPerMTok
                 + Double(totals.outputTokens) / 1_000_000 * AIPricing.haikuOutputUSDPerMTok

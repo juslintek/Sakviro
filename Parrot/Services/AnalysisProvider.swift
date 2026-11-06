@@ -109,9 +109,14 @@ enum AnalysisError: LocalizedError {
     }
 }
 
-/// Calls the Claude API (Haiku — fastest model) for low-latency structured insights.
 final class ClaudeAnalysisProvider: AnalysisProvider {
-    static let model = "claude-haiku-4-5"
+    static let defaultModel = "claude-haiku-4-5"
+    static let modelKey = "claudeModel"
+    static func selectedModel(_ defaults: UserDefaults = .standard) -> String {
+        let selected = (defaults.string(forKey: modelKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return selected.isEmpty ? defaultModel : selected
+    }
+    static var model: String { selectedModel() }
     private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
 
     var isConfigured: Bool {
@@ -123,20 +128,27 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
     // performRequest resumes off the main actor, so the counters get a lock.
     private let usageLock = NSLock()
     private var meteredUsage = AITokenTotals()
+    private var usedModels = Set<String>()
 
     var usageTotals: AITokenTotals {
         usageLock.lock(); defer { usageLock.unlock() }
         return meteredUsage
     }
 
+    var usageModel: String? {
+        usageLock.lock(); defer { usageLock.unlock() }
+        return usedModels.count > 1 ? "Multiple models" : usedModels.first
+    }
+
     func resetUsage() {
         usageLock.lock(); defer { usageLock.unlock() }
         meteredUsage = AITokenTotals()
+        usedModels.removeAll()
     }
 
     /// Every Anthropic response carries `usage {input_tokens, output_tokens}`;
     /// accumulate it here so analyze/summarize/coaching are all metered in one place.
-    private func recordUsage(from data: Data) {
+    func recordUsage(from data: Data, model: String) {
         struct Envelope: Decodable {
             struct U: Decodable {
                 let inputTokens: Int?
@@ -150,6 +162,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         }
         guard let usage = (try? JSONDecoder().decode(Envelope.self, from: data))?.usage else { return }
         usageLock.lock(); defer { usageLock.unlock() }
+        usedModels.insert(model)
         meteredUsage.inputTokens += usage.inputTokens ?? 0
         meteredUsage.outputTokens += usage.outputTokens ?? 0
         meteredUsage.calls += 1
@@ -392,7 +405,6 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
                        ["type": "text", "text": userContent]]
         } else { content = userContent }
         let body: [String: Any] = [
-            "model": Self.model,
             "max_tokens": 1024,
             "system": sys,
             "messages": [["role": "user", "content": content]],
@@ -518,7 +530,6 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         let content = Self.summaryUserContent(transcript: transcript, insightTitles: insightTitles,
                                               bookmarks: bookmarks, instructions: instructions)
         let body: [String: Any] = [
-            "model": Self.model,
             "max_tokens": 1700,
             "system": Self.summarySystemPrompt(counterpart: counterpart, template: template),
             "messages": [["role": "user", "content": content]],
@@ -576,7 +587,6 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         let content = Self.coachingUserContent(transcript: transcript, talkPercentMe: talkPercentMe,
                                                instructions: instructions, counterpart: counterpart)
         let body: [String: Any] = [
-            "model": Self.model,
             // Receipts add a stamp per bullet — a little more room than before.
             "max_tokens": 1400,
             "system": Self.coachingSystemPrompt(counterpart: counterpart, template: template),
@@ -596,7 +606,6 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             throw AnalysisError.missingAPIKey
         }
         let body: [String: Any] = [
-            "model": Self.model,
             "max_tokens": maxTokens,
             "system": system,
             "messages": [["role": "user", "content": user]],
@@ -611,6 +620,12 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
 
     // MARK: - HTTP
 
+    static func requestBody(_ body: [String: Any], model: String) throws -> Data {
+        var request = body
+        request["model"] = model
+        return try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+    }
+
     private func performRequest(body: [String: Any], apiKey: String) async throws -> Data {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -624,10 +639,9 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         // every app launch sent byte-different schema JSON and repaid the
         // one-time grammar compilation on its first analysis pass — measured at
         // 1–4 minutes for the current schema vs seconds on a cache hit.
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        let model = Self.model
+        request.httpBody = try Self.requestBody(body, model: model)
 
-        // ponytail: single retry with fixed backoff on transient failures; add
-        // jitter / Retry-After parsing if rate limits persist.
         for attempt in 0..<2 {
             let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -641,7 +655,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             guard http.statusCode == 200 else {
                 throw AnalysisError.badResponse(Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)")
             }
-            recordUsage(from: data)
+            recordUsage(from: data, model: model)
             return data
         }
         throw AnalysisError.badResponse("Unreachable")  // loop always returns or throws

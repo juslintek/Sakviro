@@ -4,11 +4,27 @@ final class CLIAnalysisProvider: AnalysisProvider {
     private let kindSource: () -> CopilotProviderKind
     private let lock = NSLock()
     private var totals = AITokenTotals()
+    private var usedModels = Set<String>()
 
     init(_ kindSource: @escaping () -> CopilotProviderKind) { self.kindSource = kindSource }
 
-    static func setting(_ kind: CopilotProviderKind, _ suffix: String) -> String {
-        UserDefaults.standard.string(forKey: "cli_\(kind.rawValue)_\(suffix)") ?? ""
+    static func setting(_ kind: CopilotProviderKind, _ suffix: String, defaults: UserDefaults = .standard) -> String {
+        defaults.string(forKey: "cli_\(kind.rawValue)_\(suffix)") ?? ""
+    }
+
+    static func customArguments(_ arguments: [String], model: String) throws -> [String] {
+        let selected = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selected.isEmpty && !arguments.contains("{model}") {
+            throw AnalysisError.badResponse("Add {model} as an argument in Settings to use the selected model.")
+        }
+        if selected.isEmpty && arguments.contains("{model}") {
+            throw AnalysisError.badResponse("Enter a model ID in Settings or remove the {model} argument.")
+        }
+        let expanded = arguments.map { $0 == "{model}" ? selected : $0 }
+        guard !expanded.contains("-c"), !expanded.contains("--command") else {
+            throw AnalysisError.badResponse("Enter custom CLI arguments as a JSON array, without shell commands.")
+        }
+        return expanded
     }
 
     static func executable(_ kind: CopilotProviderKind) -> String {
@@ -25,8 +41,16 @@ final class CLIAnalysisProvider: AnalysisProvider {
 
     var isConfigured: Bool { !Self.executable(kindSource()).isEmpty }
     var usageTotals: AITokenTotals { lock.lock(); defer { lock.unlock() }; return totals }
-    func resetUsage() { lock.lock(); totals = AITokenTotals(); lock.unlock() }
-    private func recordCall() { lock.lock(); totals.calls += 1; lock.unlock() }
+    var usageModel: String? {
+        lock.lock(); defer { lock.unlock() }
+        return usedModels.count > 1 ? "Multiple models" : usedModels.first
+    }
+    func resetUsage() { lock.lock(); totals = AITokenTotals(); usedModels.removeAll(); lock.unlock() }
+    func recordCall(kind: CopilotProviderKind, model: String) {
+        lock.lock(); defer { lock.unlock() }
+        usedModels.insert(model.isEmpty ? "\(kind.label) (default)" : model)
+        totals.calls += 1
+    }
 
     func analyze(_ request: AnalysisRequest) async throws -> AnalysisResult {
         let system = ClaudeAnalysisProvider.systemPrompt(persona: request.persona, kinds: request.kinds,
@@ -64,6 +88,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
     private func call(system: String, user: String, schema: String? = nil, jpeg: Data? = nil) async throws -> String {
         let kind = kindSource()
         let executable = Self.executable(kind)
+        let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
         var arguments: [String]
         switch kind {
         case .claudeCode:
@@ -71,7 +96,6 @@ final class CLIAnalysisProvider: AnalysisProvider {
                          "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--permission-prompts", "none"]
             if jpeg != nil { arguments += ["--input-format", "stream-json", "--verbose"] }
             if let schema { arguments += ["--json-schema", schema] }
-            let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty { arguments += ["--model", model] }
         case .customCLI:
             guard let bytes = Self.setting(kind, "arguments").data(using: .utf8),
@@ -80,24 +104,21 @@ final class CLIAnalysisProvider: AnalysisProvider {
                   !["sh", "bash", "zsh", "fish", "dash"].contains(URL(fileURLWithPath: executable).lastPathComponent) else {
                 throw AnalysisError.badResponse("Enter custom CLI arguments as a JSON array, without shell commands.")
             }
-            arguments = parsed
+            arguments = try Self.customArguments(parsed, model: model)
         case .codex:
             arguments = ["exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--json",
                          "--sandbox", "read-only", "-c", "web_search=\"disabled\"", "-c", "project_doc_max_bytes=0", "--disable", "shell_tool",
                          "--disable", "unified_exec", "--disable", "hooks", "--disable", "plugins", "--disable", "apps",
                          "--disable", "browser_use", "--disable", "computer_use", "--disable", "view_image"]
-            let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty { arguments += ["--model", model] }
             arguments += ["-"]
         case .copilot:
             arguments = ["--available-tools=parrot_no_tools", "--disable-builtin-mcps", "--no-custom-instructions",
                          "--no-auto-update", "--no-remote", "--no-remote-export", "--no-ask-user", "--no-bash-env",
                          "--log-level", "none", "--output-format", "json"]
-            let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty { arguments += ["--model", model] }
         case .gemini:
             arguments = ["-p", "Answer the supplied text.", "-o", "json"]
-            let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty { arguments += ["--model", model] }
         default:
             throw AnalysisError.badResponse("Invalid CLI provider.")
@@ -122,7 +143,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
             text = try Self.customAnswer(response, format: format)
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AnalysisError.badResponse("CLI returned an empty answer.") }
-        recordCall()
+        recordCall(kind: kind, model: model)
         return text
     }
 
