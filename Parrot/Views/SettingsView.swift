@@ -570,6 +570,7 @@ struct SettingsView: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = directory
         panel.canChooseFiles = !directory
+        if !directory { panel.resolvesAliases = false }
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
