@@ -79,7 +79,15 @@ final class TranscriptionEngine {
     /// The session's language (nil = auto). Read per decode by the local loop
     /// and swapped by `switchLanguage`. Guarded by `bufferLock`.
     private var sessionLanguage: String?
-    private var sessionBackend: TranscriptionBackend = .local
+    private(set) var sessionBackend: TranscriptionBackend = .local
+    var sessionModel = ""
+    private var usedLocalRecovery = false
+    var usageTranscriptionModel: String {
+        bufferLock.withLock { Self.usageModel(sessionModel, recovered: usedLocalRecovery, localModel: currentModel) }
+    }
+    static func usageModel(_ model: String, recovered: Bool, localModel: String) -> String {
+        recovered ? "\(model) + on-device \(localModel)" : model
+    }
     private var deepgramKey: String?
     /// Voiced audio gathered per side for the language check (one side each:
     /// interleaving both would feed Whisper stitched-up audio). nil = off.
@@ -170,7 +178,7 @@ final class TranscriptionEngine {
     /// #18 launch crash-loop). The heavy WhisperKit init is awaited, so main is
     /// never blocked. Same rule for start/stopTranscribing below.
     @MainActor
-    func loadModel(_ modelName: String = "base") async {
+    func loadModel(_ modelName: String = "base", allowDownload: Bool = true) async {
         // Switching models mid-download must not race two loads (the old
         // last-finisher-wins behavior could load a model the user had already
         // navigated away from). The newest call cancels the previous one; the
@@ -178,13 +186,13 @@ final class TranscriptionEngine {
         loadTask?.cancel()
         loadGeneration += 1
         let generation = loadGeneration
-        let task = Task { @MainActor in await self.performLoad(modelName, generation: generation) }
+        let task = Task { @MainActor in await self.performLoad(modelName, generation: generation, allowDownload: allowDownload) }
         loadTask = task
         await task.value
     }
 
     @MainActor
-    private func performLoad(_ modelName: String, generation: Int) async {
+    private func performLoad(_ modelName: String, generation: Int, allowDownload: Bool) async {
         isReady = false
         loadingModelName = Self.displayName(for: modelName)
         let previousModel = currentModel
@@ -211,7 +219,7 @@ final class TranscriptionEngine {
                 whisperKit = nil
                 modelState = .ready
                 isReady = true
-                Task { await self.loadSpeechDetector() }
+                if allowDownload { Task { await self.loadSpeechDetector() } }
                 return
             }
             if Self.isParakeet(modelName) {
@@ -229,8 +237,11 @@ final class TranscriptionEngine {
                 Task.detached(priority: .utility) { await Self.prepareFallback() }
                 return
             }
-            if Self.localModelFolder(for: modelName) == nil { modelState = .downloading(progress: 0) }
-            let kit = try await Self.makeWhisperKit(modelName, loading: { @MainActor [weak self] in
+            if Self.localModelFolder(for: modelName) == nil {
+                guard allowDownload else { throw CloudTranscriptionError.badResponse("No downloaded speech model is available. Download one in Settings.") }
+                modelState = .downloading(progress: 0)
+            }
+            let kit = try await Self.makeWhisperKit(modelName, allowDownload: allowDownload, loading: { @MainActor [weak self] in
                 if let self, self.loadGeneration == generation { self.modelState = .loading }
             }, progress: progress)
             guard loadGeneration == generation else { return }
@@ -240,7 +251,7 @@ final class TranscriptionEngine {
             modelState = .ready
             isReady = true
             // Background: a first-run download must never hold up recording.
-            Task { await self.loadSpeechDetector() }
+            if allowDownload { Task { await self.loadSpeechDetector() } }
         } catch {
             guard loadGeneration == generation, !(error is CancellationError) else { return }
             modelState = .error(error.localizedDescription)
@@ -251,6 +262,7 @@ final class TranscriptionEngine {
     /// Download (if missing) and load one WhisperKit model. `loading` runs
     /// once the files are there, before the (possibly long) Core ML load.
     nonisolated static func makeWhisperKit(_ modelName: String,
+                                           allowDownload: Bool = true,
                                            loading: (@Sendable () async -> Void)? = nil,
                                            progress: (@Sendable (Double) -> Void)? = nil) async throws -> WhisperKit {
         let resolvedModelName = hubVariant(for: modelName)
@@ -258,6 +270,7 @@ final class TranscriptionEngine {
         if let localFolder = localModelFolder(for: modelName) {
             modelFolder = localFolder
         } else {
+            guard allowDownload else { throw CloudTranscriptionError.badResponse("No downloaded speech model is available. Download one in Settings.") }
             modelFolder = try await withStallTimeout(seconds: 60) { tick in
                 try await WhisperKit.download(variant: resolvedModelName) { download in
                     let fraction = min(max(download.fractionCompleted, 0), 1)
@@ -762,7 +775,7 @@ final class TranscriptionEngine {
 
     /// Start the continuous transcription loop
     @MainActor
-    func startTranscribing(meetingStartTime: Date) {
+    func startTranscribing(meetingStartTime: Date, backend requestedBackend: TranscriptionBackend? = nil) {
         guard isReady else { return }
         // Never run two loops: cancel any prior task before starting a new one.
         transcriptionTask?.cancel()
@@ -776,12 +789,14 @@ final class TranscriptionEngine {
         // visible notice. (Deepgram streaming lands separately; until then it
         // behaves as local.)
         // An on-device-only call never uses a cloud engine.
-        var backend = forceLocal ? .local : TranscriptionBackend.selected
+        var backend = forceLocal ? .local : (requestedBackend ?? TranscriptionBackend.selected)
+        if requestedBackend == nil { sessionModel = SpeechModels.choice(backend, context: "", available: [currentModel]) ?? currentModel }
         var groqKey: String?
         cloudNotice = nil
         micHearsSpeakers = false
         self.meetingStartTime = meetingStartTime
         bufferLock.withLock {
+            usedLocalRecovery = false
             deepgramFailedSources = []
             localClockOffset = [:]
             consumedSamples = [.me: 0, .them: 0]
@@ -1156,12 +1171,13 @@ final class TranscriptionEngine {
                                 // the on-device decode above. A real 20-minute call on
                                 // 2026-09-23 was ruined that way. Re-add only with both.
                                 pieces = [(try await GroqTranscriber.transcribe(
-                                    samples: decodeSamples, language: language, apiKey: groqKey), nil)]
+                                    samples: decodeSamples, language: language, apiKey: groqKey, model: self.sessionModel), nil)]
                             } catch {
                                 AudioCaptureManager.oslog.error("Groq transcription failed: \(error.localizedDescription, privacy: .public)")
                                 await MainActor.run {
                                     self.cloudNotice = "Groq error — on-device fallback for failed chunks"
                                 }
+                                self.bufferLock.withLock { self.usedLocalRecovery = true }
                                 pieces = try await decodeLocally()
                             }
                         } else {
@@ -1311,13 +1327,16 @@ final class TranscriptionEngine {
             AudioCaptureManager.oslog.error("Deepgram stream failed (\(source.label, privacy: .public)): \(message, privacy: .public)")
             // Only this stream falls back to local; the other socket keeps
             // streaming. Re-anchor before the first fallback sample lands.
-            self.bufferLock.withLock { _ = self.deepgramFailedSources.insert(source) }
+            self.bufferLock.withLock {
+                self.usedLocalRecovery = true
+                _ = self.deepgramFailedSources.insert(source)
+            }
             self.reanchorLocalClock(source: source)
             Task { @MainActor in
                 self.cloudNotice = "Deepgram error — \(source.label) stream now on on-device Whisper"
             }
         }
-        streamer.connect(apiKey: apiKey, language: language)
+        streamer.connect(apiKey: apiKey, language: language, model: sessionModel)
         return streamer
     }
 
@@ -1395,7 +1414,7 @@ final class TranscriptionEngine {
         // can only fire on a pinned language, or Deepgram on auto; only
         // those keep checking every side all call.
         guard !holding, let heard, setting != nil || backend == .deepgram else { return }
-        let mismatch = Self.languageMismatch(setting: setting, backend: backend, heard: heard, confidence: confidence)
+        let mismatch = Self.languageMismatch(setting: setting, backend: backend, heard: heard, confidence: confidence, model: sessionModel)
         await MainActor.run {
             guard self.isTranscribing else { return }
             let (offer, recheckAfter) = self.watch.heard(source, mismatch: mismatch, confidence: confidence)
@@ -1500,13 +1519,13 @@ final class TranscriptionEngine {
     /// - heard: Whisper's language code for the call's first ~10 s of speech
     /// - confidence: Whisper's probability for `heard`, 0...1
     static func languageMismatch(setting: String?, backend: TranscriptionBackend,
-                                 heard: String, confidence: Float) -> String? {
+                                 heard: String, confidence: Float, model: String = "nova-3") -> String? {
         // 0.8: real calls score 1.00; an unsure guess must not nag.
         guard confidence >= 0.8, heard != setting,
               TranscriptionLanguage.options.contains(where: { $0.code == heard }) else { return nil }
         if setting != nil { return heard }
-        // Auto: Whisper and Groq detect anything; Deepgram only its ten.
-        return backend == .deepgram && !TranscriptionLanguage.deepgramMulti.contains(heard) ? heard : nil
+        guard backend == .deepgram, let supported = TranscriptionLanguage.deepgramMulti(model: model) else { return nil }
+        return supported.contains(heard) ? nil : heard
     }
 
     /// Re-anchor a stream's locally-derived timestamps to "now" in meeting time.

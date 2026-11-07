@@ -146,17 +146,21 @@ final class OpenAICompatibleProvider: AnalysisProvider {
     }
 
     /// Resolved fresh on every call so Settings changes apply immediately.
-    private func currentConfig() -> Config? {
-        switch kindSource() {
+    private func currentConfig(context: ModelTaskContext? = nil) -> Config? {
+        let kind = kindSource()
+        func selected(_ manual: String) -> String {
+            context.map { ModelSelection.selected(kind: kind, manual: manual, context: $0) } ?? manual
+        }
+        switch kind {
         case .claude, .claudeCode, .codex, .gemini, .copilot, .customCLI:
             return nil
         case .ollama:
             return Config(baseURL: URL(string: "http://localhost:11434/v1")!,
-                          model: Self.ollamaModel, apiKey: nil)
+                          model: selected(Self.ollamaModel), apiKey: nil)
         case .custom:
             let base = Self.customBaseURL.trimmingCharacters(in: .whitespaces)
             guard let url = URL(string: base), !base.isEmpty, !Self.customModel.isEmpty else { return nil }
-            return Config(baseURL: url, model: Self.customModel,
+            return Config(baseURL: url, model: selected(Self.customModel),
                           apiKey: APIKeyStore.load(account: "custom-llm-api-key"))
         }
     }
@@ -167,6 +171,12 @@ final class OpenAICompatibleProvider: AnalysisProvider {
 
     private let usageLock = NSLock()
     private var meteredUsage = AITokenTotals()
+    private var usedModels = Set<String>()
+
+    var usageModel: String? {
+        usageLock.lock(); defer { usageLock.unlock() }
+        return usedModels.count > 1 ? "Multiple models" : usedModels.first
+    }
 
     var usageTotals: AITokenTotals {
         usageLock.lock(); defer { usageLock.unlock() }
@@ -176,23 +186,25 @@ final class OpenAICompatibleProvider: AnalysisProvider {
     func resetUsage() {
         usageLock.lock(); defer { usageLock.unlock() }
         meteredUsage = AITokenTotals()
+        usedModels.removeAll()
     }
 
-    private func recordUsage(_ usage: ChatResponse.Usage?) {
-        recordNativeUsage(prompt: usage?.promptTokens, completion: usage?.completionTokens)
+    private func recordUsage(_ usage: ChatResponse.Usage?, model: String) {
+        recordNativeUsage(prompt: usage?.promptTokens, completion: usage?.completionTokens, model: model)
     }
 
-    private func recordNativeUsage(prompt: Int?, completion: Int?) {
+    func recordNativeUsage(prompt: Int?, completion: Int?, model: String) {
         usageLock.lock(); defer { usageLock.unlock() }
         meteredUsage.inputTokens += prompt ?? 0
         meteredUsage.outputTokens += completion ?? 0
         meteredUsage.calls += 1
+        usedModels.insert(model)
     }
 
     // MARK: - AnalysisProvider
 
     func analyze(_ request: AnalysisRequest) async throws -> AnalysisResult {
-        guard let config = currentConfig() else {
+        guard let config = currentConfig(context: .live(request)) else {
             throw AnalysisError.badResponse("Assistant model not set up. Check Settings → Assistant.")
         }
 
@@ -216,7 +228,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
     func summarize(transcript: String, insightTitles: [String], bookmarks: [String] = [],
                    instructions: String,
                    counterpart: String = "the other person", template: ReportTemplate) async throws -> String {
-        guard let config = currentConfig() else {
+        guard let config = currentConfig(context: .init(task: .report, contextLength: transcript.count)) else {
             throw AnalysisError.badResponse("Assistant model not set up. Check Settings → Assistant.")
         }
         return try await plainChat(
@@ -229,7 +241,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
 
     func coachingReport(transcript: String, talkPercentMe: Int, instructions: String,
                         counterpart: String = "the other person", template: ReportTemplate) async throws -> String {
-        guard let config = currentConfig() else {
+        guard let config = currentConfig(context: .init(task: .report, contextLength: transcript.count)) else {
             throw AnalysisError.badResponse("Assistant model not set up. Check Settings → Assistant.")
         }
         return try await plainChat(
@@ -241,7 +253,11 @@ final class OpenAICompatibleProvider: AnalysisProvider {
     }
 
     func complete(system: String, user: String, maxTokens: Int) async throws -> String {
-        guard let config = currentConfig() else {
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: .init(task: .general))
+    }
+
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
+        guard let config = currentConfig(context: context) else {
             throw AnalysisError.badResponse("Assistant model not set up. Check Settings → Assistant.")
         }
         return try await plainChat(system: system, user: user, maxTokens: maxTokens, config: config)
@@ -399,7 +415,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
                 throw AnalysisError.badResponse(Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)")
             }
             let decoded = try JSONDecoder().decode(NativeResponse.self, from: data)
-            recordNativeUsage(prompt: decoded.promptEvalCount, completion: decoded.evalCount)
+            recordNativeUsage(prompt: decoded.promptEvalCount, completion: decoded.evalCount, model: config.model)
             guard decoded.doneReason != "length" else {
                 throw AnalysisError.badResponse("Response truncated (hit max_tokens)")
             }
@@ -459,7 +475,7 @@ final class OpenAICompatibleProvider: AnalysisProvider {
                 throw AnalysisError.badResponse(Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)")
             }
             let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-            recordUsage(decoded.usage)
+            recordUsage(decoded.usage, model: config.model)
             guard decoded.choices.first?.finishReason != "length" else {
                 throw AnalysisError.badResponse("Response truncated (hit max_tokens)")
             }
@@ -664,10 +680,10 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     }
 
     /// Ask Parrot's calls (rewrite and answer), redacted like reports.
-    func completeAsk(system: String, user: String, maxTokens: Int) async throws -> String {
+    func completeAsk(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
         var r: Redactor? = (askEffectiveKind != .ollama && Redactor.isEnabled) ? Redactor() : nil
         let out = try await askProvider.complete(system: system, user: r?.redact(user) ?? user,
-                                                 maxTokens: maxTokens)
+                                                 maxTokens: maxTokens, context: context)
         return r?.restore(out) ?? out
     }
 
@@ -676,7 +692,11 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     var askUsesOllama: Bool { askEffectiveKind == .ollama }
     var askConfigured: Bool { askProvider.isConfigured }
     var askModelLabel: String {
-        Self.askLabel(kind: askEffectiveKind, model: CopilotProviderKind.modelName(for: askEffectiveKind))
+        let kind = askEffectiveKind
+        let used = (askProvider as? ClaudeAnalysisProvider)?.usageModel
+            ?? (askProvider as? CLIAnalysisProvider)?.usageModel
+            ?? (askProvider as? OpenAICompatibleProvider)?.usageModel
+        return Self.askLabel(kind: kind, model: used ?? CopilotProviderKind.modelName(for: kind))
     }
 
     // MARK: Role-split metering for the cost row
@@ -684,7 +704,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     /// Live bucket: model/provider label + tokens. When both roles share one
     /// instance this is the COMBINED bucket and `reportsUsage` is nil.
     var liveUsage: (model: String, provider: String, totals: AITokenTotals) {
-        (Self.liveKind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((liveProvider as? CLIAnalysisProvider)?.usageModel ?? CopilotProviderKind.modelName(for: Self.liveKind)),
+        (Self.liveKind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((liveProvider as? CLIAnalysisProvider)?.usageModel ?? (liveProvider as? OpenAICompatibleProvider)?.usageModel ?? CopilotProviderKind.modelName(for: Self.liveKind)),
          Self.liveKind.rawValue,
          liveProvider.usageTotals)
     }
@@ -693,7 +713,7 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     var reportsUsage: (model: String, provider: String, totals: AITokenTotals)? {
         guard !rolesShareInstance else { return nil }
         let kind = Self.reportsKind
-        return (kind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((reportsProvider as? CLIAnalysisProvider)?.usageModel ?? CopilotProviderKind.modelName(for: kind)),
+        return (kind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((reportsProvider as? CLIAnalysisProvider)?.usageModel ?? (reportsProvider as? OpenAICompatibleProvider)?.usageModel ?? CopilotProviderKind.modelName(for: kind)),
                 kind.rawValue,
                 reportsProvider.usageTotals)
     }

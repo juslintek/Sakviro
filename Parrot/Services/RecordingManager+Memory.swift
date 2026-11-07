@@ -66,18 +66,20 @@ extension RecordingManager {
         // The answer request: a local model sees the earlier questions only.
         let answerHistory = local ? AskEngine.history(chat.messages, cloud: false, answers: false) : history
         progress("Thinking…")
-        // Ollama counts as set up whenever it's picked; check it's really
-        // there before sending anything (Task 5).
-        var ollamaProblem: String?
-        if aiReady, switching?.askUsesOllama == true {
-            ollamaProblem = AskEngine.ollamaNote(installed: await OllamaProbe.installedModels(),
-                                                 model: OpenAICompatibleProvider.ollamaModel)
+        let installedOllamaModels = aiReady && switching?.askUsesOllama == true ? await OllamaProbe.installedModels() : []
+        func ollamaNote(contextLength: Int) -> String? {
+            guard switching?.askUsesOllama == true else { return nil }
+            let context = ModelTaskContext(task: .ask, prompt: question, contextLength: contextLength)
+            let model = ModelSelection.selected(kind: .ollama, manual: OpenAICompatibleProvider.ollamaModel, context: context)
+            return AskEngine.ollamaNote(installed: installedOllamaModels, model: model)
         }
-        let aiUsable = aiReady && ollamaProblem == nil
+        let aiUsable = aiReady
 
-        func complete(_ system: String, _ user: String, _ maxTokens: Int) async throws -> String {
-            try await CloudGate.$scopeLocal.withValue(local) {
-                if let switching { return try await switching.completeAsk(system: system, user: user, maxTokens: maxTokens) }
+        func complete(_ system: String, _ user: String, _ maxTokens: Int, contextLength: Int = 0) async throws -> String {
+            if let note = ollamaNote(contextLength: contextLength) { throw AnalysisError.badResponse(note) }
+            return try await CloudGate.$scopeLocal.withValue(local) {
+                if let switching { return try await switching.completeAsk(system: system, user: user, maxTokens: maxTokens,
+                                                                         context: .init(task: .ask, prompt: question, contextLength: contextLength)) }
                 return try await provider.complete(system: system, user: user, maxTokens: maxTokens)
             }
         }
@@ -213,12 +215,14 @@ extension RecordingManager {
         let usedPrivate = AskEngine.answerIsPrivate(hitMeetingIDs: Set(hits.map(\.meetingID) + listed.map(\.id)),
                                                     messages: chat.messages, privateIDs: privateIDs, local: local)
 
+        let ollamaProblem = ollamaNote(contextLength: context.count + meetingList.count + meetingFacts.count)
+        let answerUsable = aiUsable && ollamaProblem == nil
         // A count question can find no passages yet still be answered from the list.
-        guard !hits.isEmpty || (aiUsable && !meetingList.isEmpty) else {
+        guard !hits.isEmpty || (answerUsable && !meetingList.isEmpty) else {
             return AskEngine.Result(lines: [AskEngine.Line(text: "Nothing in your meetings matches that yet.", citations: [])],
                                     sources: [], refs: [], answeredByAI: false, note: privateNote, searchedFor: searchedFor)
         }
-        guard aiUsable else {
+        guard answerUsable else {
             return AskEngine.Result(lines: AskEngine.excerptLines(hits), sources: hits, refs: refs,
                                     answeredByAI: false,
                                     note: ollamaProblem ?? "Pick an AI at the top of this chat for written answers. These are the closest moments.",
@@ -232,7 +236,7 @@ extension RecordingManager {
                                                                  // A new topic gets no old answers to copy from.
                                                                  history: newTopic ? "" : answerHistory,
                                                                  meetingList: meetingList,
-                                                                 facts: meetingFacts), 700)
+                                                                 facts: meetingFacts), 700, contextLength: context.count + meetingList.count + meetingFacts.count)
             let lines = AskEngine.parse(answer, refs: refs) { id, time in
                 byID[id]?.receiptIndex.resolve(time) != nil
             }

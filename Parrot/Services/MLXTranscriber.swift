@@ -50,6 +50,17 @@ enum MLXTranscriber {
         return object["text"] as? String ?? ""
     }
 
+    static func available(python: String, modelPath: String) async throws -> Bool {
+        let id = UUID().uuidString
+        let request: [String: Any] = ["operation": "mlx", "id": id, "action": "probe", "python": python, "model": modelPath]
+        let response = try await HostHelperClient.shared.perform(JSONSerialization.data(withJSONObject: request), identifier: id)
+        guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
+              object["ok"] as? Bool == true, let available = object["available"] as? Bool else {
+            throw Failure.message("Invalid MLX availability response")
+        }
+        return available
+    }
+
     private enum Failure: LocalizedError {
         case message(String)
         var errorDescription: String? { if case .message(let message) = self { return message }; return nil }

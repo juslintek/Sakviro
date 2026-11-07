@@ -52,6 +52,11 @@ struct SettingsView: View {
 
     @Environment(RecordingManager.self) private var recordingManager
     @AppStorage("whisperModel") private var selectedModel = "base"
+    @AppStorage("speechModelAuto.local") private var localSpeechAuto = false
+    @AppStorage("speechModelAuto.groq") private var groqSpeechAuto = false
+    @AppStorage("speechModelAuto.deepgram") private var deepgramSpeechAuto = false
+    @AppStorage("speechModel.groq") private var groqSpeechModel = "whisper-large-v3-turbo"
+    @AppStorage("speechModel.deepgram") private var deepgramSpeechModel = "nova-3"
     @AppStorage("appearance") private var appearance = Appearance.system
     @AppStorage(ParrotAppDelegate.hideDockKey) private var hideDock = false
     @AppStorage("copilotEnabled") private var copilotEnabled = false
@@ -398,8 +403,31 @@ struct SettingsView: View {
                 )
             }
 
+            if transcriptionBackend == TranscriptionBackend.groq.rawValue {
+                SettingsCard(title: "Groq Live Transcription Model") {
+                    SettingsToggleRow(title: "Auto", detail: "Choose a model from the call brief. Changes apply to the next recording; polish uses its own model.", isOn: $groqSpeechAuto)
+                    SettingsBlockRow(title: "Manual model") {
+                        Picker("", selection: $groqSpeechModel) {
+                            Text("Whisper Large V3 Turbo").tag("whisper-large-v3-turbo")
+                            Text("Whisper Large V3").tag("whisper-large-v3")
+                        }.labelsHidden().pickerStyle(.radioGroup)
+                        .onChange(of: groqSpeechModel) { _, _ in groqSpeechAuto = false }
+                    }
+                }
+            }
+            if transcriptionBackend == TranscriptionBackend.deepgram.rawValue {
+                SettingsCard(title: "Deepgram Live Transcription Model") {
+                    SettingsToggleRow(title: "Auto", detail: "Uses Nova-3. Changes apply to the next recording.", isOn: $deepgramSpeechAuto)
+                    SettingsBlockRow(title: "Manual model ID") {
+                        TextField("nova-3", text: $deepgramSpeechModel)
+                            .onChange(of: deepgramSpeechModel) { _, _ in deepgramSpeechAuto = false }
+                        Hint("Default: nova-3. A custom model must support your selected language and streaming.")
+                    }
+                }
+            }
             SettingsCard(title: "On-Device Model") {
-                SettingsBlockRow(title: "Model", first: true) {
+                SettingsToggleRow(title: "Auto", detail: "Choose a downloaded model for the next recording or import using the language and call brief. Your manual choice is saved.", isOn: $localSpeechAuto)
+                SettingsBlockRow(title: "Manual model") {
                     Picker("", selection: $selectedModel) {
                         Text("Parakeet v3 — 0.5 GB, fastest, 25 European languages (no Turkish)")
                             .tag(ParakeetTranscriber.modelID)
@@ -415,6 +443,7 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.radioGroup)
                     .labelsHidden()
+                    .onChange(of: selectedModel) { _, _ in localSpeechAuto = false }
 
                     if selectedModel == ParakeetTranscriber.modelID {
                         Hint(parakeetFitsLanguage
@@ -445,6 +474,7 @@ struct SettingsView: View {
                                 await recordingManager.transcriptionEngine.loadModel(selectedModel)
                             }
                         }
+                        .disabled(recordingManager.isBusy || recordingManager.isRecording)
                     }
                 }
             }
@@ -511,9 +541,9 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .fixedSize()
                 }
-                if transcriptionBackend == TranscriptionBackend.deepgram.rawValue, transcriptionLanguage == "auto" {
+                if transcriptionBackend == TranscriptionBackend.deepgram.rawValue, transcriptionLanguage == "auto", !deepgramSpeechAuto, ["nova-2", "nova-2-general"].contains(deepgramSpeechModel) {
                     SettingsRow {
-                        Label("Deepgram's auto-detect doesn't cover Turkish, Arabic, Chinese or Korean. Pick the language for those calls.",
+                        Label("Nova-2 auto-detect covers English and Spanish. Pick a language for other calls.",
                               systemImage: "exclamationmark.triangle.fill")
                             .font(Theme.Typography.secondary)
                             .foregroundStyle(Theme.Colors.warn)
@@ -556,7 +586,7 @@ struct SettingsView: View {
     private var modelStatusView: some View {
         switch recordingManager.transcriptionEngine.modelState {
         case .ready:
-            Label("Model loaded and ready", systemImage: "checkmark.circle")
+            Label("\(TranscriptionEngine.displayName(for: recordingManager.transcriptionEngine.currentModel)) loaded and ready", systemImage: "checkmark.circle")
                 .foregroundStyle(Theme.Colors.good)
                 .font(Theme.Typography.secondary)
         case .loading:
@@ -712,6 +742,7 @@ struct SettingsView: View {
                 Button("Open API Keys") { section = .apiKeys }
             }
             ProviderModelSettings(model: $claudeModel, kind: .claude)
+            ProviderAutoModelSettings(kind: .claude, manual: $claudeModel)
             SettingsRow {
                 Hint("Optional: add a TypeSafe key to show matching excerpts from your documents within a second of a question.")
             }
@@ -742,6 +773,7 @@ struct SettingsView: View {
                         .frame(width: 200)
                 }
             }
+            ProviderAutoModelSettings(kind: .ollama, manual: $copilotOllamaModel)
             SettingsRow {
                 OllamaModelStatusView(model: copilotOllamaModel)
             }
@@ -758,6 +790,7 @@ struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 220)
             }
+            ProviderAutoModelSettings(kind: .custom, manual: $copilotCustomModel)
             SettingsRow {
                 ProviderKeyField(
                     label: "API key",

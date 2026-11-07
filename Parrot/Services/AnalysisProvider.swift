@@ -59,6 +59,59 @@ struct AnalysisRequest {
     var screenContext: ScreenContext? = nil
 }
 
+struct ModelTaskContext {
+    enum Task { case live, report, ask, general }
+    let task: Task
+    var prompt = ""
+    var contextLength = 0
+    var hasScreen = false
+
+    static func live(_ request: AnalysisRequest) -> Self {
+        Self(task: .live, prompt: request.callBrief,
+             contextLength: request.transcript.count + request.references.reduce(0) { $0 + $1.text.count },
+             hasScreen: request.screenContext != nil)
+    }
+}
+
+enum ModelSelection {
+    enum Tier: String { case fast, context, deep }
+
+    static func defaults(_ kind: CopilotProviderKind) -> [String] {
+        switch kind {
+        case .claude: ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+        case .claudeCode: ["haiku", "sonnet", "opus"]
+        case .codex: ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+        case .gemini: ["flash", "pro", "pro"]
+        case .copilot: ["auto", "gpt-5.4", "gpt-5.4"]
+        default: ["", "", ""]
+        }
+    }
+
+    static func key(_ kind: CopilotProviderKind, _ suffix: String) -> String {
+        "modelAuto_\(kind.rawValue)_\(suffix)"
+    }
+
+    static func tier(_ context: ModelTaskContext) -> Tier {
+        let prompt = context.prompt.lowercased()
+        let fast = ["quickly", "quick answer", "briefly", "trumpai", "greitai"]
+        let deep = ["in depth", "in-depth", "deep analysis", "compare in detail", "išsamiai", "issamiai", "detaliai palygink"]
+        if fast.contains(where: prompt.contains) { return .fast }
+        if deep.contains(where: prompt.contains) { return .deep }
+        if context.task == .report || context.hasScreen || context.contextLength >= 12_000 { return .context }
+        return .fast
+    }
+
+    static func selected(kind: CopilotProviderKind, manual: String, context: ModelTaskContext,
+                         defaults store: UserDefaults = .standard) -> String {
+        guard store.bool(forKey: key(kind, "enabled")) else { return manual }
+        let tier = tier(context)
+        let index = tier == .fast ? 0 : tier == .context ? 1 : 2
+        let candidate = (store.string(forKey: key(kind, tier.rawValue)) ?? defaults(kind)[index])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return candidate.isEmpty ? manual : candidate
+    }
+}
+
 /// Combined result from one analysis pass: structured insights plus a sentiment reading.
 struct AnalysisResult {
     let insights: [InsightDraft]
@@ -86,6 +139,7 @@ protocol AnalysisProvider {
     /// One plain-text answer for a system + user prompt: Ask Parrot, the
     /// follow-up email. Runs on the post-call reports brain.
     func complete(system: String, user: String, maxTokens: Int) async throws -> String
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String
     /// Cumulative token usage since the last reset — drives the per-meeting
     /// cost row. Defaults below keep non-metering providers/mocks unchanged.
     var usageTotals: AITokenTotals { get }
@@ -93,6 +147,9 @@ protocol AnalysisProvider {
 }
 
 extension AnalysisProvider {
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
+        try await complete(system: system, user: user, maxTokens: maxTokens)
+    }
     var usageTotals: AITokenTotals { AITokenTotals() }
     func resetUsage() {}
 }
@@ -411,7 +468,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             "output_config": ["format": ["type": "json_schema", "schema": schemaObj]],
         ]
 
-        let data = try await performRequest(body: body, apiKey: apiKey)
+        let data = try await performRequest(body: body, apiKey: apiKey, context: .live(request))
         let parsed = try Self.parseResult(from: data)
         let sourceValidated = Self.validatingSources(parsed.insights, knownDocuments: request.knownDocumentNames + Self.screenSources(request))
         let kindValidated = Self.validatingKinds(sourceValidated, allowed: Set(request.kinds.map(\.key)))
@@ -535,7 +592,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             "messages": [["role": "user", "content": content]],
         ]
 
-        let data = try await performRequest(body: body, apiKey: apiKey)
+        let data = try await performRequest(body: body, apiKey: apiKey, context: .init(task: .report, contextLength: transcript.count))
         let response = try JSONDecoder().decode(MessagesResponse.self, from: data)
         guard let text = response.content.first(where: { $0.type == "text" })?.text else {
             throw AnalysisError.badResponse("Empty model response")
@@ -593,7 +650,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             "messages": [["role": "user", "content": content]],
         ]
 
-        let data = try await performRequest(body: body, apiKey: apiKey)
+        let data = try await performRequest(body: body, apiKey: apiKey, context: .init(task: .report, contextLength: transcript.count))
         let response = try JSONDecoder().decode(MessagesResponse.self, from: data)
         guard let text = response.content.first(where: { $0.type == "text" })?.text else {
             throw AnalysisError.badResponse("Empty model response")
@@ -602,6 +659,10 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
     }
 
     func complete(system: String, user: String, maxTokens: Int) async throws -> String {
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: .init(task: .general))
+    }
+
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
         guard let apiKey = APIKeyStore.load(), !apiKey.isEmpty else {
             throw AnalysisError.missingAPIKey
         }
@@ -610,7 +671,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
             "system": system,
             "messages": [["role": "user", "content": user]],
         ]
-        let data = try await performRequest(body: body, apiKey: apiKey)
+        let data = try await performRequest(body: body, apiKey: apiKey, context: context)
         let response = try JSONDecoder().decode(MessagesResponse.self, from: data)
         guard let text = response.content.first(where: { $0.type == "text" })?.text else {
             throw AnalysisError.badResponse("Empty model response")
@@ -626,7 +687,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         return try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
     }
 
-    private func performRequest(body: [String: Any], apiKey: String) async throws -> Data {
+    private func performRequest(body: [String: Any], apiKey: String, context: ModelTaskContext) async throws -> Data {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
@@ -639,7 +700,7 @@ final class ClaudeAnalysisProvider: AnalysisProvider {
         // every app launch sent byte-different schema JSON and repaid the
         // one-time grammar compilation on its first analysis pass — measured at
         // 1–4 minutes for the current schema vs seconds on a cache hit.
-        let model = Self.model
+        let model = ModelSelection.selected(kind: .claude, manual: Self.model, context: context)
         request.httpBody = try Self.requestBody(body, model: model)
 
         for attempt in 0..<2 {

@@ -57,6 +57,7 @@ struct AIUsage: Codable {
     var docAnswers: AITokenTotals?
     /// Live transcription engine (TranscriptionBackend rawValue).
     var transcriptionBackend = TranscriptionBackend.local.rawValue
+    var transcriptionModel: String? = nil
     /// Audio duration per track, seconds.
     var transcriptionSeconds: Double = 0
     /// Billable audio tracks (mic + system = 2; 1 when the mic never recorded).
@@ -99,6 +100,11 @@ struct AIUsage: Codable {
         }
         let backend = TranscriptionBackend(rawValue: transcriptionBackend) ?? .local
         let billedSeconds = transcriptionSeconds * Double(transcriptionTracks)
+        let transcriptionPriced: Bool = switch backend {
+        case .local: true
+        case .groq: transcriptionModel == nil || transcriptionModel == "whisper-large-v3-turbo"
+        case .deepgram: transcriptionModel == nil || transcriptionModel == "nova-3"
+        }
         let transcriptionUSD: Double = switch backend {
         case .local: 0
         case .groq: billedSeconds / 3600 * AIPricing.groqUSDPerAudioHour
@@ -107,8 +113,8 @@ struct AIUsage: Codable {
         }
         items.append(LineItem(
             label: "Transcription \(backend.label)",
-            detail: backend == .local ? "on-device" : Self.compactMinutes(billedSeconds),
-            usd: transcriptionUSD))
+            detail: backend == .local ? "on-device" : Self.compactMinutes(billedSeconds) + (transcriptionPriced ? "" : " · rates not tracked"),
+            usd: transcriptionPriced ? transcriptionUSD : 0, priced: transcriptionPriced))
         if polishSeconds > 0 {
             items.append(LineItem(
                 label: "Polish Groq",

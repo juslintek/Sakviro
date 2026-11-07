@@ -42,6 +42,7 @@ struct CLIProviderSettings: View {
         }
         ProviderModelSettings(model: $model, kind: kind)
             .onChange(of: model) { _, _ in checkMessage = "" }
+        ProviderAutoModelSettings(kind: kind, manual: $model)
         SettingsRow {
             Hint("Meeting text is sent to the CLI account's service. Check confirms the executable only, not sign-in.")
         }
@@ -103,5 +104,43 @@ struct ProviderModelSettings: View {
                 TextField("Model ID", text: $model).textFieldStyle(.roundedBorder).frame(width: 220)
             }
         }
+    }
+}
+
+struct ProviderAutoModelSettings: View {
+    let kind: CopilotProviderKind
+    @Binding var manual: String
+    @AppStorage private var enabled: Bool
+    @AppStorage private var fast: String
+    @AppStorage private var context: String
+    @AppStorage private var deep: String
+
+    init(kind: CopilotProviderKind, manual: Binding<String>) {
+        self.kind = kind
+        _manual = manual
+        let models = ModelSelection.defaults(kind)
+        _enabled = AppStorage(wrappedValue: false, ModelSelection.key(kind, "enabled"))
+        _fast = AppStorage(wrappedValue: models[0], ModelSelection.key(kind, "fast"))
+        _context = AppStorage(wrappedValue: models[1], ModelSelection.key(kind, "context"))
+        _deep = AppStorage(wrappedValue: models[2], ModelSelection.key(kind, "deep"))
+    }
+
+    var body: some View {
+        SettingsLabeledRow(title: "Automatic model", detail: "Shared by roles using this integration. Uses the manual model when a field is blank. Availability depends on your account.") {
+            Picker("Model selection", selection: $enabled) {
+                Text("Manual").tag(false)
+                Text("Auto").tag(true)
+            }.labelsHidden().accessibilityLabel("\(kind.label) model selection").pickerStyle(.segmented).fixedSize()
+        }
+        SettingsLabeledRow(title: "Fast model", detail: "Live cards and short questions") {
+            TextField("Use manual model", text: $fast).textFieldStyle(.roundedBorder).frame(width: 220)
+        }
+        SettingsLabeledRow(title: "Context model", detail: "Reports, screens and long context") {
+            TextField("Use manual model", text: $context).textFieldStyle(.roundedBorder).frame(width: 220)
+        }
+        SettingsLabeledRow(title: "Deep model", detail: "Explicit requests for detailed analysis") {
+            TextField("Use manual model", text: $deep).textFieldStyle(.roundedBorder).frame(width: 220)
+        }
+        .onChange(of: manual) { _, _ in enabled = false }
     }
 }

@@ -21,13 +21,14 @@ final class HostMLXService {
     private var pending: Set<String> = []
     private var cancelled: Set<String> = []
     private var active: String?
+    private var activeUsesWorker = false
 
     func perform(_ requestData: Data, reply: @escaping (Data?, String?) -> Void) {
         guard requestData.count <= 3_000_000,
               let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
               request["operation"] as? String == "mlx",
               let identifier = request["id"] as? String, UUID(uuidString: identifier) != nil,
-              let action = request["action"] as? String, ["load", "transcribe", "unload"].contains(action) else {
+              let action = request["action"] as? String, ["load", "transcribe", "unload", "probe"].contains(action) else {
             reply(nil, "Invalid MLX request")
             return
         }
@@ -45,17 +46,32 @@ final class HostMLXService {
                 self.pending.remove(identifier)
                 self.cancelled.remove(identifier)
                 self.active = nil
+                self.activeUsesWorker = false
                 self.lock.unlock()
             }
             self.lock.lock()
             let wasCancelled = self.cancelled.contains(identifier)
             self.active = identifier
+            self.activeUsesWorker = action != "probe"
             self.lock.unlock()
             guard !wasCancelled else { reply(nil, "MLX request cancelled"); return }
             do {
                 if action == "unload" {
                     self.stopWorker()
                     reply(Data("{\"ok\":true}".utf8), nil)
+                    return
+                }
+                if action == "probe" {
+                    guard let executable = request["python"] as? String, executable.hasPrefix("/"),
+                          let model = request["model"] as? String, model.hasPrefix("/") else {
+                        throw Failure.message("Choose a Python executable and local MLX model folder")
+                    }
+                    let files = FileManager.default
+                    let folder = URL(fileURLWithPath: model)
+                    let available = files.isExecutableFile(atPath: executable)
+                        && files.fileExists(atPath: folder.appendingPathComponent("config.json").path)
+                        && ["weights.safetensors", "weights.npz"].contains { files.fileExists(atPath: folder.appendingPathComponent($0).path) }
+                    reply(try JSONSerialization.data(withJSONObject: ["ok": true, "available": available]), nil)
                     return
                 }
                 guard let executable = request["python"] as? String,
@@ -94,7 +110,7 @@ final class HostMLXService {
                 guard !wasCancelled else { throw Failure.message("MLX request cancelled or timed out") }
                 reply(response, nil)
             } catch {
-                self.stopWorker()
+                if action != "probe" { self.stopWorker() }
                 reply(nil, error.localizedDescription)
             }
         }
@@ -104,7 +120,7 @@ final class HostMLXService {
         lock.lock()
         guard pending.contains(identifier) else { lock.unlock(); return }
         cancelled.insert(identifier)
-        let running = active == identifier ? process : nil
+        let running = active == identifier && activeUsesWorker ? process : nil
         lock.unlock()
         if let running { stopMLXProcess(running) }
     }

@@ -59,7 +59,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
         let schemaData = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
         let schemaText = String(decoding: schemaData, as: UTF8.self)
         let text = try await call(system: system + "\nReturn only a JSON object matching this schema: " + schemaText,
-                                  user: ClaudeAnalysisProvider.analysisUserContent(request), schema: schemaText, jpeg: request.screenContext?.jpeg)
+                                  user: ClaudeAnalysisProvider.analysisUserContent(request), schema: schemaText, jpeg: request.screenContext?.jpeg, context: .live(request))
         let parsed = try ClaudeAnalysisProvider.parseAnalysisPayload(text)
         let sources = ClaudeAnalysisProvider.validatingSources(parsed.insights, knownDocuments: request.knownDocumentNames + ClaudeAnalysisProvider.screenSources(request))
         let kinds = ClaudeAnalysisProvider.validatingKinds(sources, allowed: Set(request.kinds.map(\.key)))
@@ -71,24 +71,31 @@ final class CLIAnalysisProvider: AnalysisProvider {
                    counterpart: String, template: ReportTemplate) async throws -> String {
         try await call(system: ClaudeAnalysisProvider.summarySystemPrompt(counterpart: counterpart, template: template),
                        user: ClaudeAnalysisProvider.summaryUserContent(transcript: transcript, insightTitles: insightTitles,
-                                                                       bookmarks: bookmarks, instructions: instructions))
+                                                                       bookmarks: bookmarks, instructions: instructions),
+                       context: .init(task: .report, contextLength: transcript.count))
     }
 
     func coachingReport(transcript: String, talkPercentMe: Int, instructions: String,
                         counterpart: String, template: ReportTemplate) async throws -> String {
         try await call(system: ClaudeAnalysisProvider.coachingSystemPrompt(counterpart: counterpart, template: template),
                        user: ClaudeAnalysisProvider.coachingUserContent(transcript: transcript, talkPercentMe: talkPercentMe,
-                                                                        instructions: instructions, counterpart: counterpart))
+                                                                        instructions: instructions, counterpart: counterpart),
+                       context: .init(task: .report, contextLength: transcript.count))
     }
 
     func complete(system: String, user: String, maxTokens: Int) async throws -> String {
-        try await call(system: system, user: user)
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: .init(task: .general))
     }
 
-    private func call(system: String, user: String, schema: String? = nil, jpeg: Data? = nil) async throws -> String {
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
+        try await call(system: system, user: user, context: context)
+    }
+
+    private func call(system: String, user: String, schema: String? = nil, jpeg: Data? = nil, context: ModelTaskContext) async throws -> String {
         let kind = kindSource()
         let executable = Self.executable(kind)
-        let model = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
+        let manual = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = ModelSelection.selected(kind: kind, manual: manual, context: context)
         var arguments: [String]
         switch kind {
         case .claudeCode:

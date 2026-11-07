@@ -41,6 +41,10 @@ struct ParrotMain {
             LiveLoopTest.run(audioPath: args[i + 1], model: model)
             return
         }
+        if let i = args.firstIndex(of: "--speech-auto-check"), i + 3 < args.count {
+            Task { @MainActor in await SpeechAutoCheck.run(python: args[i + 1], modelPath: args[i + 2], audioPath: args[i + 3]) }
+            dispatchMain()
+        }
         if let i = args.firstIndex(of: "--transcribe-test"), i + 1 < args.count {
             let modelFolder = (i + 2 < args.count) ? args[i + 2] : ""
             TranscribeTest.run(audioPath: args[i + 1], modelFolder: modelFolder)

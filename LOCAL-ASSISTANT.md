@@ -3,7 +3,7 @@
 The separate local build keeps its own app data and does not update from the upstream Parrot feed. Build it with:
 
 ```sh
-make VERSION=0.29.9-sakviro1 SIGN_IDENTITY=-
+make VERSION=0.29.9-sakviro2 SIGN_IDENTITY=-
 ```
 
 The fork uses `main` for its own work. Keep upstream Parrot history and attribution, and bring upstream changes into the fork before applying Sakviro commits on top; inspect changes and conflicts before integrating.
@@ -11,6 +11,10 @@ The fork uses `main` for its own work. Keep upstream Parrot history and attribut
 Copy the resulting `dist/Parrot.app` to a separate app name. Ad-hoc signatures change on rebuild, so macOS may request microphone, system-audio and screen access again. Keep the original app and its data separate.
 
 In Settings → Transcription, choose an MLX model, the Python executable with `mlx-whisper`, and its local model folder. Automatic language detection works with the Lithuanian and English model choices; a specific language can also be selected. Model quality depends on the recording and model. The companion `../SETUP.md` lists this Mac's installed paths.
+
+Auto model selection is optional and independent for each transcription or Assistant provider. Turning it off restores the saved manual choice. Local speech Auto selects an already downloaded compatible model before a recording or import, using the selected language and call brief; it does not detect language word by word. Groq and Deepgram Auto choose models within their selected service. Cloud polish keeps its separate model. Models without known prices are shown as unpriced, so totals can be partial.
+
+For the Assistant, Auto chooses the configured Fast, Context or Deep candidate for the selected provider based on the request. Candidate IDs can be changed in Settings; availability depends on the provider and account. Auto does not switch providers.
 
 In Settings → Assistant, select a CLI provider. Cloud CLI providers send meeting text to the selected account's service; they do not send audio. Sign in through that CLI first. On-device only blocks cloud providers. The app does not read project folders until documents are added to its Knowledge Base. Use the call brief to name the project when its context matters.
 

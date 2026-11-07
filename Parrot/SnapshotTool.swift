@@ -1878,3 +1878,64 @@ enum ReportSnapshot {
     - Create a calm-down menu and report back on which skills Alex likes [52:40]
     """
 }
+
+
+enum SpeechAutoCheck {
+    @MainActor
+    static func run(python: String, modelPath: String, audioPath: String) async {
+        let defaults = UserDefaults.standard
+        let previous = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        var settings = previous
+        settings[MLXTranscriber.pythonKey] = python
+        for model in MLXTranscriber.models { settings[MLXTranscriber.modelKey(model.id)] = "/nonexistent/speech-auto-check" }
+        settings[MLXTranscriber.modelKey("mlx-english")] = modelPath
+        settings["whisperModel"] = "base"
+        settings[TranscriptionLanguage.defaultsKey] = "auto"
+        settings[SpeechModels.autoKey(.local)] = true
+        defaults.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
+        defer { defaults.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
+        func require(_ condition: Bool, _ label: String) {
+            guard condition else { print("FAIL \(label)"); exit(1) }
+            print("PASS \(label)")
+        }
+        do {
+            require(try await SpeechModels.choice(.local, context: "") == "mlx-english", "Auto unknown selects cached generic MLX")
+            require(try await SpeechModels.choice(.local, context: "Lithuanian and English") == "mlx-english", "Auto mixed selects cached generic MLX")
+            require(try await MLXTranscriber.available(python: python, modelPath: "/nonexistent/speech-auto-check") == false, "missing MLX folder is rejected")
+        } catch {
+            print("FAIL MLX availability: \(error.localizedDescription)")
+            exit(1)
+        }
+        let engine = TranscriptionEngine()
+        await engine.loadModel("mlx-english", allowDownload: false)
+        require(engine.isReady && engine.currentModel == "mlx-english", "cached MLX loads through host helper")
+        do {
+            do {
+                _ = try await MLXTranscriber.available(python: "relative", modelPath: modelPath)
+                require(false, "invalid probe is rejected")
+            } catch { print("PASS invalid probe is rejected") }
+            let probe = Task { try await MLXTranscriber.available(python: python, modelPath: modelPath) }
+            probe.cancel()
+            _ = try? await probe.value
+            let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: audioPath))
+            let transcript = try await MLXTranscriber.perform(action: "transcribe", model: "mlx-english", samples: samples, language: "en")
+            require(transcript.lowercased().contains("project") && transcript.lowercased().contains("schedule"), "synthetic audio transcribes after invalid and cancelled probes")
+        } catch {
+            print("FAIL synthetic audio transcription: \(error.localizedDescription)")
+            exit(1)
+        }
+        settings[SpeechModels.autoKey(.local)] = false
+        defaults.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
+        do {
+            require(try await SpeechModels.choice(.local, context: "") == "base", "manual model remains selected after Auto")
+        } catch {
+            print("FAIL manual model selection: \(error.localizedDescription)")
+            exit(1)
+        }
+        await engine.loadModel("speech-auto-check-missing", allowDownload: false)
+        if case .error(let message) = engine.modelState {
+            require(!engine.isReady && message.contains("No downloaded speech model"), "missing model fails without download")
+        } else { require(false, "missing model fails without download") }
+        exit(0)
+    }
+}

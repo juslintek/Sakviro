@@ -116,7 +116,7 @@ jobs:
       - name: Test build (release, ad-hoc)
         if: github.event_name != 'pull_request'
         run: |
-          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.29.9-sakviro1-ci
+          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.29.9-sakviro2-ci
           ditto dist/Parrot.app "$RUNNER_TEMP/Sakviro.app"
           ditto -c -k --keepParent "$RUNNER_TEMP/Sakviro.app" Sakviro-test.zip
           test -s Sakviro-test.zip

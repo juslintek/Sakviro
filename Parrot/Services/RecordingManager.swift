@@ -420,14 +420,21 @@ final class RecordingManager {
         // start two recordings / two transcription loops. Also blocked while a
         // file import is running — both drive the same shared WhisperKit.
         guard !isRecording, !isStarting, !isStopping, importProgress == nil else { return }
-        guard mode == .screenOnly || transcriptionEngine.isReady else {
-            throw RecordingError.modelNotReady
-        }
         isStarting = true
         defer { isStarting = false }
 
         let profile = profileOverride ?? profileStore.activeProfile
         if mode == .screenOnly || useScreen { try requireScreenAnalysis(profile: profile) }
+        var requestedBackend = TranscriptionBackend.local
+        if mode == .meeting {
+            let forceLocal = UserDefaults.standard.bool(forKey: CloudGate.globalKey) || profile?.onDeviceOnly == true
+            requestedBackend = forceLocal ? .local : TranscriptionBackend.selected
+            var backend = requestedBackend
+            if let account = backend.keychainAccount, APIKeyStore.load(account: account)?.isEmpty != false { backend = .local }
+            let context = nextCallBrief + " " + (profile?.isUserModified == true ? (profile?.summary ?? "") + " " + (profile?.persona ?? "") : "")
+            try await prepareSpeechModel(backend: backend, context: context)
+            try Task.checkCancellation()
+        }
 
         var videoFilter: SCContentFilter?
         if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
@@ -610,7 +617,7 @@ final class RecordingManager {
 
         // Start transcription and the copilot loop
         transcriptionEngine.forceLocal = meeting.onDeviceOnly
-        if mode == .meeting { transcriptionEngine.startTranscribing(meetingStartTime: .now) }
+        if mode == .meeting { transcriptionEngine.startTranscribing(meetingStartTime: .now, backend: requestedBackend) }
         callAnalysisEngine.provider.resetUsage()  // this call's token meter starts at zero
         docMatcher.resetUsage()
         nudges.start(gauges: profile?.gauges ?? [])
@@ -830,8 +837,7 @@ final class RecordingManager {
     func importAudioFile(from pickedURL: URL, modelContext: ModelContext) -> Meeting? {
         self.modelContext = modelContext
         // One owner of WhisperKit at a time: refuse while recording or importing.
-        guard !isRecording, !isStarting, !isStopping, importProgress == nil,
-              transcriptionEngine.isReady else { return nil }
+        guard !isRecording, !isStarting, !isStopping, importProgress == nil else { return nil }
 
         // A user-picked file lives outside the sandbox — open the scope to copy it.
         let scoped = pickedURL.startAccessingSecurityScopedResource()
@@ -871,6 +877,17 @@ final class RecordingManager {
         return meeting
     }
 
+    private func prepareSpeechModel(backend: TranscriptionBackend, context: String) async throws {
+        guard let model = try await SpeechModels.choice(backend, context: context), !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw RecordingError.noDownloadedSpeechModel }
+        let localAuto = backend == .local && UserDefaults.standard.bool(forKey: SpeechModels.autoKey(.local))
+        let local = localAuto ? model : (UserDefaults.standard.string(forKey: "whisperModel") ?? "base")
+        if !transcriptionEngine.isReady || transcriptionEngine.currentModel != local {
+            await transcriptionEngine.loadModel(local, allowDownload: !localAuto)
+        }
+        guard transcriptionEngine.isReady, transcriptionEngine.currentModel == local else { throw RecordingError.modelNotReady }
+        transcriptionEngine.sessionModel = model
+    }
+
     private func runImport(meeting: Meeting, audioURL: URL) async {
         await CloudGate.$scopeLocal.withValue(meeting.onDeviceOnly) {
             await self.runImportWork(meeting: meeting, audioURL: audioURL)
@@ -881,6 +898,15 @@ final class RecordingManager {
         defer {
             importProgress = nil
             AppUpdater.shared.becameIdle()
+        }
+
+        do {
+            try await prepareSpeechModel(backend: .local, context: meeting.brief ?? "")
+        } catch {
+            meeting.status = .failed
+            meeting.errorMessage = error.localizedDescription
+            try? modelContext?.save()
+            return
         }
 
         // 1. Whole-file, on-device transcription. Every segment is "Them" (one
@@ -1478,7 +1504,9 @@ final class RecordingManager {
         // ponytail: reads the backend setting at stop time; a mid-call engine
         // switch or cloud→local fallback mislabels one estimated row. Import
         // passes an override since it's always on-device regardless of the setting.
-        usage.transcriptionBackend = (backendOverride ?? TranscriptionBackend.selected).rawValue
+        let usedBackend = backendOverride ?? transcriptionEngine.sessionBackend
+        usage.transcriptionBackend = usedBackend.rawValue
+        usage.transcriptionModel = usedBackend == .local ? transcriptionEngine.sessionModel : transcriptionEngine.usageTranscriptionModel
         usage.transcriptionSeconds = meeting.duration
         usage.transcriptionTracks = meeting.micAudioPath?.nilIfEmpty != nil ? 2 : 1
         // Same stop-time read as the backend above: auto-detect = Deepgram "multi".
@@ -1745,12 +1773,14 @@ final class RecordingManager {
 
 enum RecordingError: LocalizedError {
     case modelNotReady
+    case noDownloadedSpeechModel
     case screenAnalysisUnavailable
     case speakersNotDetected
 
     var errorDescription: String? {
         switch self {
-        case .modelNotReady: "The speech model is still loading. Please wait."
+        case .modelNotReady: "The speech model could not be loaded. Check the model in Settings."
+        case .noDownloadedSpeechModel: "Auto needs a downloaded compatible speech model. Download one or choose a model in Settings."
         case .screenAnalysisUnavailable: "Screen analysis is unavailable. Choose a vision-capable AI and review your privacy settings."
         case .speakersNotDetected: "Speaker detection didn't work this time. Try again."
         }

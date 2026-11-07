@@ -33,6 +33,7 @@ enum ProfileTest {
         testHallucinationFilter()
         testWAVEncoder()
         testAIUsageCost()
+        testSpeechModels()
         testCLIResponses()
         testPermissionFlow()
         testMicWatchdog()
@@ -158,6 +159,19 @@ enum ProfileTest {
         let suite = "parrot-provider-model-test-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
+        let live = ModelTaskContext(task: .live)
+        let screen = ModelTaskContext(task: .live, hasScreen: true)
+        let long = ModelTaskContext(task: .ask, contextLength: 12_000)
+        check("Auto disabled preserves CLI default", ModelSelection.selected(kind: .codex, manual: "", context: live, defaults: defaults) == "")
+        defaults.set(true, forKey: ModelSelection.key(.codex, "enabled"))
+        check("Auto live uses fast", ModelSelection.selected(kind: .codex, manual: "manual", context: live, defaults: defaults) == "gpt-6-luna")
+        check("Auto screen and long context", ModelSelection.tier(screen) == .context && ModelSelection.tier(long) == .context)
+        check("Auto deep English and Lithuanian", ModelSelection.tier(.init(task: .ask, prompt: "Compare in detail")) == .deep && ModelSelection.tier(.init(task: .ask, prompt: "Išsamiai atsakyk")) == .deep)
+        check("Auto fast intent wins", ModelSelection.tier(.init(task: .ask, prompt: "Quickly, in depth")) == .fast)
+        check("Auto ignores context text for tier", ModelSelection.tier(.init(task: .live, contextLength: "in depth".count)) == .fast)
+        defaults.set("", forKey: ModelSelection.key(.codex, "fast"))
+        check("Auto empty candidate uses manual", ModelSelection.selected(kind: .codex, manual: "manual", context: live, defaults: defaults) == "manual")
+        check("Auto stays in integration", ModelSelection.selected(kind: .gemini, manual: "gemini-manual", context: live, defaults: defaults) == "gemini-manual")
         check("Claude default model", ClaudeAnalysisProvider.selectedModel(defaults) == ClaudeAnalysisProvider.defaultModel)
         defaults.set("custom-model", forKey: ClaudeAnalysisProvider.modelKey)
         defaults.set("model-a", forKey: "cli_codex_model")
@@ -166,6 +180,11 @@ enum ProfileTest {
         let body = (try? ClaudeAnalysisProvider.requestBody(["messages": []], model: ClaudeAnalysisProvider.selectedModel(defaults)))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         check("Claude request sends selected model", body?["model"] as? String == "custom-model")
+        let compat = OpenAICompatibleProvider()
+        compat.recordNativeUsage(prompt: 1, completion: 1, model: "sent-model")
+        check("Compatible usage captures sent model", compat.usageModel == "sent-model")
+        compat.recordNativeUsage(prompt: 1, completion: 1, model: "other-model")
+        check("Compatible usage identifies mixed models", compat.usageModel == "Multiple models")
         let claude = ClaudeAnalysisProvider()
         let tokenUsage = Data(#"{"usage":{"input_tokens":1,"output_tokens":1}}"#.utf8)
         claude.recordUsage(from: tokenUsage, model: ClaudeAnalysisProvider.defaultModel)
@@ -1006,7 +1025,18 @@ enum ProfileTest {
         check("deepgram auto-detect bills multilingual $0.35/hr", abs(invoice.totalUSD - 220.0 / 3600 * 0.35) < 0.0001)
         // Snapshots saved before the flag existed decode as the one-language rate.
         let legacy = try? JSONDecoder().decode(AIUsage.self, from: Data(#"{"copilotModel":"","copilot":{"inputTokens":0,"outputTokens":0,"calls":0},"transcriptionBackend":"deepgram","transcriptionSeconds":110,"transcriptionTracks":2,"polishSeconds":0}"#.utf8))
-        check("old deepgram snapshot keeps $0.29/hr", legacy.map { abs($0.totalUSD - 220.0 / 3600 * 0.29) < 0.0001 } ?? false)
+        check("old deepgram snapshot keeps $0.29/hr", legacy.map { $0.transcriptionModel == nil && abs($0.totalUSD - 220.0 / 3600 * 0.29) < 0.0001 } ?? false)
+        invoice.transcriptionModel = "nova-3"
+        check("nova-3 keeps tracked price", invoice.costBreakdown().first?.priced == true && invoice.totalUSD > 0)
+        invoice.transcriptionModel = "nova-2"
+        check("other Deepgram model price untracked", invoice.costBreakdown().first.map { !$0.priced && $0.usd == 0 && $0.detail.contains("rates not tracked") } ?? false)
+        invoice.transcriptionBackend = TranscriptionBackend.groq.rawValue
+        invoice.transcriptionModel = "whisper-large-v3-turbo"
+        check("Groq turbo keeps tracked price", invoice.costBreakdown().first?.priced == true && invoice.totalUSD > 0)
+        invoice.transcriptionModel = "whisper-large-v3"
+        check("Groq large-v3 price untracked", invoice.costBreakdown().first.map { !$0.priced && $0.usd == 0 } ?? false)
+        invoice.transcriptionBackend = TranscriptionBackend.local.rawValue
+        check("local transcription remains free", invoice.costBreakdown().first.map { $0.priced && $0.usd == 0 } ?? false)
         check("polish cost ~$0.0133", abs(items[2].usd - 1200.0 / 3600 * 0.04) < 0.0001)
         check("total sums line items", abs(usage.totalUSD - items.reduce(0) { $0 + $1.usd }) < 0.0001)
 
@@ -2499,12 +2529,15 @@ enum ProfileTest {
     /// The live "sounds like Turkish — switch" offer (2026-09-30: a Turkish
     /// call pinned to English came out as 46 minutes of nonsense).
     static func testLanguageMismatch() {
-        let m = TranscriptionEngine.languageMismatch
+        func m(_ setting: String?, _ backend: TranscriptionBackend, _ heard: String, _ confidence: Float) -> String? {
+            TranscriptionEngine.languageMismatch(setting: setting, backend: backend, heard: heard, confidence: confidence)
+        }
         check("lang: Turkish call pinned to English → offer Turkish",
               m("en", .deepgram, "tr", 0.99) == "tr")
         check("lang: same language → quiet", m("tr", .deepgram, "tr", 0.99) == nil)
         check("lang: unsure guess → quiet", m("en", .local, "tr", 0.3) == nil)
-        check("lang: Deepgram auto can't do Turkish → offer Turkish", m(nil, .deepgram, "tr", 0.99) == "tr")
+        check("lang: Nova-3 auto covers Turkish → quiet", m(nil, .deepgram, "tr", 0.99) == nil)
+        check("lang: Nova-2 auto offers Lithuanian", TranscriptionEngine.languageMismatch(setting: nil, backend: .deepgram, heard: "lt", confidence: 0.99, model: "nova-2") == "lt")
         check("lang: Deepgram auto covers Spanish → quiet", m(nil, .deepgram, "es", 0.99) == nil)
         check("lang: Whisper auto handles Turkish → quiet", m(nil, .local, "tr", 0.99) == nil)
         check("lang: never offer a language the picker lacks", m("en", .local, "sw", 0.99) == nil)
