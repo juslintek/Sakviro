@@ -54,6 +54,7 @@ final class HostCLIService {
             throw failure("Could not determine the account home directory.")
         }
         let home = String(cString: homePointer)
+        let user = account.pointee.pw_name.map { String(cString: $0) } ?? ""
         let executable: String
         if requestedExecutable.hasPrefix("@") {
             let name = String(requestedExecutable.dropFirst())
@@ -154,6 +155,10 @@ final class HostCLIService {
         defer { for ptr in argv where ptr != nil { free(ptr) } }
         var environment = ["HOME=\(home)", "PATH=\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                            "TMPDIR=\(directory.path)", "LANG=en_US.UTF-8"]
+        if !user.isEmpty {
+            environment.append("USER=\(user)")
+            environment.append("LOGNAME=\(user)")
+        }
         if object["preset"] as? String == "copilot" { environment.append("COPILOT_HOME=\(directory.path)") }
         if object["preset"] as? String == "gemini" { environment.append("GEMINI_CLI_HOME=\(directory.path)") }
         var envp = environment.map { strdup($0) } + [nil]
