@@ -753,7 +753,7 @@ final class RecordingManager {
                 else {
                     meeting.rawVideoPath = url.path
                     meeting.videoOffset = offset
-                    meeting.videoError = "Video stopped early. Retry to add audio to the saved portion."
+                    await retryVideoMux(meeting)
                 }
                 meeting.videoWarning = reason
             } catch {

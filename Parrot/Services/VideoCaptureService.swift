@@ -90,6 +90,7 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
     var onActivity: ((Date) -> Void)?
     private var sourceActivity = ScreenSourceActivity()
     private var acceptingFrames = true
+    private var streamStopped = false
     private var lastActivityReportedAt: Date = .distantPast
 
     @MainActor
@@ -131,6 +132,11 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
 
     func start(filter: SCContentFilter, audioOrigin: TimeInterval, archive: Bool = true) async throws {
         lastActivityReportedAt = .distantPast
+        queue.sync {
+            streamStopped = false
+            acceptingFrames = true
+            failure = nil
+        }
         let preset = VideoArchivePreset.current
         let scale = CGFloat(filter.pointPixelScale)
         let sourceWidth = filter.contentRect.width * scale
@@ -250,7 +256,9 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         queue.async {
-            guard stream === self.stream, self.acceptingFrames else { return }
+            guard stream === self.stream else { return }
+            self.streamStopped = true
+            guard self.acceptingFrames else { return }
             _ = self.sourceActivity.update(.stopped)
             self.failure = error
             self.onInactive?()
@@ -258,11 +266,28 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         }
     }
 
+    private static func isAlreadyStoppedError(_ error: Error) -> Bool {
+        let ns = error as NSError
+        return ns.domain == SCStreamErrorDomain && ns.code == SCStreamError.attemptToStopStreamState.rawValue
+    }
+
     func stop() async throws -> (URL, TimeInterval) {
-        await deactivateSource()
-        if let stream {
+        let shouldStopStream: Bool = await withCheckedContinuation { continuation in
+            queue.async {
+                _ = self.sourceActivity.update(.stopped)
+                self.acceptingFrames = false
+                self.onInactive?()
+                self.onFrame = nil
+                self.onActivity = nil
+                let shouldStop = self.stream != nil && !self.streamStopped
+                self.streamStopped = true
+                continuation.resume(returning: shouldStop)
+            }
+        }
+        if shouldStopStream, let stream {
             do { try await stream.stopCapture() }
-            catch { queue.async { self.failure = error } }
+            catch where Self.isAlreadyStoppedError(error) { }
+            catch { queue.async { if self.failure == nil { self.failure = error } } }
         }
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
@@ -291,28 +316,23 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
     }
 
     func stopWatching() async throws {
-        await deactivateSource()
-        if let stream { try await stream.stopCapture() }
-        await withCheckedContinuation { continuation in
-            queue.async {
-                self.onFrame = nil
-                continuation.resume()
-            }
-        }
-        if let failure { throw failure }
-    }
-
-    private func deactivateSource() async {
-        await withCheckedContinuation { continuation in
+        let shouldStopStream: Bool = await withCheckedContinuation { continuation in
             queue.async {
                 _ = self.sourceActivity.update(.stopped)
                 self.acceptingFrames = false
                 self.onInactive?()
                 self.onFrame = nil
                 self.onActivity = nil
-                continuation.resume()
+                let shouldStop = self.stream != nil && !self.streamStopped
+                self.streamStopped = true
+                continuation.resume(returning: shouldStop)
             }
         }
+        if shouldStopStream, let stream {
+            do { try await stream.stopCapture() }
+            catch where Self.isAlreadyStoppedError(error) { }
+        }
+        if let failure, !Self.isAlreadyStoppedError(failure) { throw failure }
     }
 
     static func mux(video: URL, offset: TimeInterval, audio: [URL], destination: URL) async throws {
