@@ -39,8 +39,9 @@ extension RecordingManager {
         }
         let due = Retention.due(items, now: now, audioDays: audioDays, meetingDays: meetingDays)
         let byID = Dictionary(meetings.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var deleted = 0
         for id in due.meetings {
-            if let m = byID[id], !(isRecording && currentMeeting?.id == id) { delete(m) }
+            if let m = byID[id], delete(m) { deleted += 1 }
         }
         for id in due.audio {
             guard let m = byID[id] else { continue }
@@ -59,9 +60,9 @@ extension RecordingManager {
         }
         if !due.audio.isEmpty { try? modelContext.save() }
         if !due.audio.isEmpty || !due.meetings.isEmpty {
-            NSLog("Parrot: retention removed audio from \(due.audio.count) meeting(s), deleted \(due.meetings.count)")
+            NSLog("Parrot: retention removed audio from \(due.audio.count) meeting(s), deleted \(deleted)")
         }
-        return (due.audio.count, due.meetings.count)
+        return (due.audio.count, deleted)
     }
 }
 
@@ -83,6 +84,12 @@ enum PrivacyLedger {
             switch provider ?? "claude" {
             case "claude": out.append("Transcript text → Anthropic (Claude), for \(job)")
             case "custom": out.append("Transcript text → your custom AI server, for \(job)")
+            case "claudeCode": out.append("Transcript text → Claude Code account connection, for \(job)")
+            case "codex": out.append("Transcript text → ChatGPT / Codex account connection, for \(job)")
+            case "gemini": out.append("Transcript text → Gemini account connection, for \(job)")
+            case "copilot": out.append("Transcript text → GitHub Copilot account connection, for \(job)")
+            case "customCLI": out.append("Transcript text → your custom CLI (may use an external service), for \(job)")
+            case "assistantIntegrations": out.append("Transcript text → enabled assistant connections, for \(job)")
             default: break   // Ollama: local
             }
         }

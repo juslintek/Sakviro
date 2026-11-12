@@ -1,4 +1,5 @@
 import AVFoundation
+import Accelerate
 import ScreenCaptureKit
 import CoreAudio
 import Combine
@@ -161,7 +162,7 @@ final class AudioCaptureManager: NSObject {
     /// Loudest mic buffer seen this recording. Separates "the mic delivers
     /// nothing" (dead/denied → micSeemsDead) from "the mic delivers a whisper"
     /// (input volume set very low → micVeryQuiet).
-    private(set) var micPeakLevel: Float = 0
+    @ObservationIgnored private(set) var micPeakLevel: Float = 0
     /// Whether the mic stream is actually capturing (false = system audio only).
     private(set) var micActive = false
     private(set) var inputDeviceName = ""
@@ -169,7 +170,7 @@ final class AudioCaptureManager: NSObject {
     /// Capture-start time, or the last moment the mic carried real signal. While the
     /// mic has never been heard it stays at capture start, so it doubles as "how long
     /// the mic has been silent since recording began".
-    private(set) var lastMicSignalAt = Date.distantPast
+    @ObservationIgnored private(set) var lastMicSignalAt = Date.distantPast
 
     /// True once the mic has produced any real signal this recording. A user who is
     /// merely listening (normal while the other side talks) just hasn't spoken yet —
@@ -285,6 +286,9 @@ final class AudioCaptureManager: NSObject {
         filesClosed = false  // fresh URLs above; queues are idle, so no race
 
         let t0 = ProcessInfo.processInfo.systemUptime
+        captureOrigin = t0
+        systemFramesOut = 0
+        micFramesOut = 0
         try await startSystemAudioCapture()
         let t1 = ProcessInfo.processInfo.systemUptime
         dbgSck = DebugAccumulator(label: captureBackend.rawValue)
@@ -306,8 +310,6 @@ final class AudioCaptureManager: NSObject {
         micEverHadSignal = false
         micPeakLevel = 0
         echoCancellerStarved = false
-        systemFramesOut = 0
-        micFramesOut = 0
         captureOrigin = ProcessInfo.processInfo.systemUptime
         isCapturing = true
         Self.oslog.log("capture live — \(self.captureBackend.rawValue, privacy: .public) up in \(Int((t1 - t0) * 1000), privacy: .public) ms, mic in \(Int((self.captureOrigin - t1) * 1000), privacy: .public) ms")
@@ -404,7 +406,7 @@ final class AudioCaptureManager: NSObject {
         let tap = SystemAudioTap(targetFormat: targetFormat)
         tap.onBuffer = { [weak self] buffer in
             guard let self, self.isCapturing else { return }
-            self.handleSystemAudio(buffer)
+            self.handleSystemAudio(buffer, ownsBuffer: true)
         }
         try tap.start()
         processTap = tap
@@ -492,18 +494,19 @@ final class AudioCaptureManager: NSObject {
     /// grant, feed the echo-canceller reference, update the level, and hand the
     /// buffer to transcription. Buffers arrive as 16 kHz mono Float32 from
     /// either backend; runs on that backend's own audio queue.
-    private func handleSystemAudio(_ pcmBuffer: AVAudioPCMBuffer) {
+    private func handleSystemAudio(_ pcmBuffer: AVAudioPCMBuffer, ownsBuffer: Bool = false) {
+        let samples = Self.floats(from: pcmBuffer)
+        let rawLevel = (!tapEverHadSignal || Self.audioDebugEnabled) ? Self.meanAbs(samples) : 0
         // First nonzero sample through the tap is the only readable proof of
         // the System Audio TCC grant — persist it for PermissionFlow.
-        if captureBackend == .tap, !tapEverHadSignal,
-           Self.meanAbs(Self.floats(from: pcmBuffer)) > 0 {
+        if captureBackend == .tap, !tapEverHadSignal, rawLevel > 0 {
             tapEverHadSignal = true
             UserDefaults.standard.set(true, forKey: PermissionFlow.tapProvenKey)
         }
 
         if Self.audioDebugEnabled {
             dbgSck.add(
-                raw: Self.meanAbs(Self.floats(from: pcmBuffer)),
+                raw: rawLevel,
                 clean: nil,
                 refBacklog: nil,
                 extra: String(format: " fmt=%.0fHz x%dch",
@@ -513,7 +516,7 @@ final class AudioCaptureManager: NSObject {
         // Feed the same audio to the echo canceller as the far-end reference, so it
         // can subtract this from the mic. Only when it's the expected 16 kHz mono.
         if pcmBuffer.format.sampleRate == sampleRate, pcmBuffer.format.channelCount == channels {
-            echoCanceller?.pushReference(Self.floats(from: pcmBuffer))
+            echoCanceller?.pushReference(samples)
         } else if echoCanceller != nil, !echoCancellerStarved {
             // Without a reference the AEC is silently a no-op and speaker bleed
             // transcribes as "Me" — surface it once instead of hiding it.
@@ -525,7 +528,7 @@ final class AudioCaptureManager: NSObject {
         updateAudioLevel(buffer: pcmBuffer)
 
         // Persist everyone else's voice ("Them") and transcribe it
-        emit(pcmBuffer, to: .system)
+        emit(pcmBuffer, to: .system, ownsBuffer: ownsBuffer)
     }
 
     // MARK: - Microphone (AVAudioEngine)
@@ -567,7 +570,7 @@ final class AudioCaptureManager: NSObject {
             // Convert to target format
             guard let converter else { return }
             let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate
+                (Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate).rounded(.up)
             )
             guard frameCount > 0,
                   let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else {
@@ -594,9 +597,10 @@ final class AudioCaptureManager: NSObject {
                 // off, this returns the mic unchanged. With it on, it returns cleaned
                 // 10 ms frames (possibly empty until a frame fills) — fail-safe.
                 let micFloats = Self.floats(from: convertedBuffer)
+                let rawMean = Self.meanAbs(micFloats)
                 // Watch the RAW mic, pre-AEC: the canceller legitimately emits
                 // empty/quiet frames, but only the OS produces exact zeros.
-                let verdict = self.micWatchdog.observe(meanAbs: Self.meanAbs(micFloats), at: Date())
+                let verdict = self.micWatchdog.observe(meanAbs: rawMean, at: Date())
                 if verdict != .ok { self.handleMicWatchdog(verdict) }
                 let cleaned = Self.micOut(self.echoCanceller?.process(mic: micFloats) ?? micFloats,
                                           muted: self.micMuted)
@@ -617,7 +621,7 @@ final class AudioCaptureManager: NSObject {
                 }
                 if Self.audioDebugEnabled {
                     self.dbgMic.add(
-                        raw: Self.meanAbs(micFloats),
+                        raw: rawMean,
                         clean: cleaned.isEmpty ? nil : Self.meanAbs(cleaned),
                         refBacklog: self.echoCanceller?.referenceBacklog,
                         extra: String(format: " devfmt=%.0fHz", inputFormat.sampleRate))
@@ -626,7 +630,7 @@ final class AudioCaptureManager: NSObject {
                       let cleanedBuffer = Self.makeBuffer(cleaned, format: targetFormat) else { return }
 
                 // Persist the user's voice ("Me") as 16 kHz mono PCM and transcribe it
-                self.emit(cleanedBuffer, to: .mic)
+                self.emit(cleanedBuffer, to: .mic, ownsBuffer: true)
 
                 // Update the mic level so the UI can show the user's voice landing.
                 self.updateAudioLevel(buffer: cleanedBuffer, isMic: true)
@@ -742,7 +746,7 @@ final class AudioCaptureManager: NSObject {
     /// .caf file and transcription), first padding any silence the stream owes
     /// the recording clock. Never to the echo canceller or level meters: a burst
     /// of padding would push the AEC reference seconds out of step with the mic.
-    private func emit(_ buffer: AVAudioPCMBuffer, to stream: AudioStream) {
+    private func emit(_ buffer: AVAudioPCMBuffer, to stream: AudioStream, ownsBuffer: Bool = false) {
         let source: AudioSource = stream == .system ? .them : .me
         let rate = buffer.format.sampleRate
         var out = stream == .system ? systemFramesOut : micFramesOut
@@ -763,12 +767,12 @@ final class AudioCaptureManager: NSObject {
             for channel in UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList) {
                 memset(channel.mData, 0, Int(channel.mDataByteSize))
             }
-            appendAudio(silence, to: stream)
+            appendAudio(silence, to: stream, ownsBuffer: true)
             onAudioBuffer?(silence, source)
             owed -= Int(silence.frameLength)
             out += Int(silence.frameLength)
         }
-        appendAudio(buffer, to: stream)
+        appendAudio(buffer, to: stream, ownsBuffer: ownsBuffer)
         onAudioBuffer?(buffer, source)
         out += Int(buffer.frameLength)
         if stream == .system { systemFramesOut = out } else { micFramesOut = out }
@@ -777,9 +781,9 @@ final class AudioCaptureManager: NSObject {
     /// Appends a PCM buffer to a stream's .caf file off the capture/render thread.
     /// The file is created lazily from the first buffer's own format, so writes can
     /// never fail on a format mismatch and there is no codec to initialize. The
-    /// buffer is deep-copied because the audio system reuses it after we return.
-    private func appendAudio(_ buffer: AVAudioPCMBuffer, to stream: AudioStream) {
-        guard let copy = buffer.deepCopy() else { return }
+    /// buffer is deep-copied unless `ownsBuffer` is true.
+    private func appendAudio(_ buffer: AVAudioPCMBuffer, to stream: AudioStream, ownsBuffer: Bool = false) {
+        guard let copy = ownsBuffer ? buffer : buffer.deepCopy() else { return }
         let queue = stream == .system ? systemWriteQueue : micWriteQueue
         let url = stream == .system ? systemAudioURL : micAudioURL
         guard let url else { return }
@@ -807,14 +811,6 @@ final class AudioCaptureManager: NSObject {
     }
 
     private func updateAudioLevel(buffer: AVAudioPCMBuffer, isMic: Bool = false) {
-        guard let channelData = buffer.floatChannelData?[0] else { return }
-        let frames = Int(buffer.frameLength)
-        var sum: Float = 0
-        for i in 0..<frames {
-            sum += abs(channelData[i])
-        }
-        let avg = sum / Float(max(frames, 1))
-
         // Throttle the main-thread hop per stream: the waveform only needs ~10
         // updates/sec, and dispatching every ~20 ms buffer (×2 streams) thrashed
         // SwiftUI. Sampling at 10 Hz still detects a live mic well within the
@@ -828,17 +824,34 @@ final class AudioCaptureManager: NSObject {
             lastSystemLevelAt = now
         }
 
+        guard let channelData = buffer.floatChannelData?[0] else { return }
+        let frames = Int(buffer.frameLength)
+        var avg: Float = 0
+        if frames > 0 {
+            vDSP_meamgv(channelData, 1, &avg, vDSP_Length(frames))
+        }
+
         DispatchQueue.main.async {
             if isMic {
-                self.micLevel = avg
-                self.micPeakLevel = max(self.micPeakLevel, avg)
+                if abs(avg - self.micLevel) >= 0.003 || (avg == 0 && self.micLevel != 0) {
+                    self.micLevel = avg
+                }
+                if avg > self.micPeakLevel {
+                    self.micPeakLevel = avg
+                }
                 // Speech sits well above room noise; treat this as "mic is alive".
                 if avg > 0.004 {
-                    self.lastMicSignalAt = Date()
-                    self.micEverHadSignal = true
+                    if now.timeIntervalSince(self.lastMicSignalAt) >= 1.0 {
+                        self.lastMicSignalAt = now
+                    }
+                    if !self.micEverHadSignal {
+                        self.micEverHadSignal = true
+                    }
                 }
             } else {
-                self.audioLevel = avg
+                if abs(avg - self.audioLevel) >= 0.003 || (avg == 0 && self.audioLevel != 0) {
+                    self.audioLevel = avg
+                }
             }
         }
     }
@@ -909,7 +922,11 @@ final class AudioCaptureManager: NSObject {
     /// loop gates on (against its rolling adaptive floor).
     private static func meanAbs(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
-        return samples.reduce(into: Float(0)) { $0 += abs($1) } / Float(samples.count)
+        var result: Float = 0
+        samples.withUnsafeBufferPointer { buf in
+            vDSP_meamgv(buf.baseAddress!, 1, &result, vDSP_Length(buf.count))
+        }
+        return result
     }
 
     /// Mono float samples from a PCM buffer.
@@ -951,7 +968,7 @@ extension AudioCaptureManager: SCStreamOutput {
             return
         }
 
-        handleSystemAudio(pcmBuffer)
+        handleSystemAudio(pcmBuffer, ownsBuffer: true)
     }
 }
 

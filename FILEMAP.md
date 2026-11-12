@@ -18,6 +18,9 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Parrot/ProfileTest+Nudges.swift` | 387 | `--profile-test` checks for live nudges, the tone timeline, seconds-based talk share and gauges the Assistant can't read yet (null, not 0) |
 | `Parrot/ReportPDFHarness.swift` | 190 | `--report-pdf <out.pdf> [meeting id or row] [--store path]`: a meeting's Export PDF plus a PNG per page, on a copy of the store; no meeting = the demo call (investor pitch with a scorecard); `REPORT_PDF_PAPER=a4\|letter` |
 | `Parrot/ProfileTest+ReportPDF.swift` | 50 | `--profile-test` checks for the Export PDF's HTML (sections, scorecards, escaping, nothing from the transcript or notes) |
+| `Parrot/ProfileTest+AssistantRouting.swift` | 60 | `--profile-test` checks enabled integration migration, privacy, image fallback and failure backoff |
+| `Parrot/ProfileTest+Messenger.swift` | 45 | `--profile-test` checks native MessengerDesk request boundaries, Meta-only live sources, explicit approval and uncertain send labels |
+| `Parrot/ProfileTest+MeetingDeletion.swift` | 139 | `--profile-test` checks legacy missing session modes, persisted deletion and children, retained shared profiles, and media safety after a failed save |
 
 ## Models (SwiftData `@Model` + Codable values)
 
@@ -35,12 +38,13 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Models/Bookmark.swift` | 50 | A marked moment (time + label); merge window, prompt line |
 | `Models/Nudge.swift` | 65 | A live nudge (kind, time, text, shown or held) and the Copilot's mood timeline; JSON on `Meeting` |
 | `Models/Consent.swift` | 45 | How the other side was told it's recorded; notice text |
-| `Models/OnboardingFlow.swift` | 79 | Setup steps per mode and path, named-step migration, memory-based model picks |
+| `Models/OnboardingFlow.swift` | 79 | Account-connection setup steps, saved-step migration and memory-based model picks |
 
 ## Services
 
 | File | L | Purpose |
 |---|---|---|
+| `Services/MessengerService.swift` | 220 | Native MessengerDesk loopback client, local token copied to Keychain once, local drafts, Meta-only approved sends and draft-only archives |
 | `Services/RecordingManager.swift` | 1496 | Orchestrates meeting and screen-only sessions, screen privacy policy and capture lifecycle; the hub; echo dedupe (`isBleed` drops a Me line whose words mostly repeat an other-side line close by, scored on the Me line so their short word can't delete mine, a 1-2 word line only once the echo gate heard the speakers; `strippingEcho` cuts their words out of a Me line once the call's echo gate has fired; `dedupedEcho` does both for the post-call polish); `justFinished` (the window's "Call saved" sheet); `writeReport` (Write report on a saved meeting); `writeAbout` (AI title + About after the report, backfilled on open); "Still recording?" reminder; live speaker sweeps (stable/window mapping, power pacing) |
 | `Services/CallAbout.swift` | 100 | Pure: the title + "About this call" prompt (misheard-name rule), report or transcript opening as input, JSON / "Title:" line parsing and clipping |
 | `Services/AudioCaptureManager.swift` | 1120 | System audio (tap on 15+, SCK on 14.x/rescue) + mic tap, buffer conversion; once-a-minute echo log with the mic volume slider; `PARROT_AEC_DUMP=1` saves the canceller's raw mic + paired reference (`AECDump`) |
@@ -57,6 +61,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Services/DiarizationEngine.swift` | 156 | FluidAudio pyannote diarization (CoreML): labels + per-speaker embeddings; whole file or a live 60 s tail |
 | `Services/ScreenContext.swift` | 35 | Sampled frame metadata and bounded JPEG validation |
 | `Services/VideoCaptureService.swift` | 400 | ScreenCaptureKit source selection and optional archive; bounded changed-frame JPEG sampler |
+| `Services/AssistantRouting.swift` | 175 | Enabled account-backed assistants, local speech migration, capability filtering, failure backoff and automatic request fallback |
 | `Services/CLIAnalysisProvider.swift` | 150 | CLI provider requests including native image attachments through the host helper |
 | `Services/AnalysisProvider.swift` | 605 | `AnalysisProvider` protocol, request/result types and screen-aware prompt building, **Keychain helpers** (~L575) |
 | `Services/OpenAICompatibleProvider.swift` | 528 | OpenAI-shaped LLM client (incl. Ollama); provider switching |
@@ -102,7 +107,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Services/Redactor.swift` | 200 | Hide emails/phones/cards/IBANs/names from cloud AI and restore them; request/result helpers |
 | `Services/Retention.swift` | 55 | Automatic clean-up rules (audio / whole meetings after N days) |
 | `Services/RecordingManager+Privacy.swift` | 100 | Consent recording, retention run, PrivacyLedger ("what left this Mac") |
-| `Services/CopilotSetupState.swift` | 91 | Settings each Copilot path writes, auto-enable when the Ollama model lands, Copilot status for Ready and Home |
+| `Services/CopilotSetupState.swift` | 91 | Enabled assistant readiness, local-model auto-enable and privacy hold for Ready and Home |
 | `Services/ProviderKeyCheck.swift` | 56 | One-request Claude and Deepgram key checks |
 | `Services/OllamaService.swift` | 134 | App-wide Ollama server state and the one model pull; resumes at launch |
 | `Services/OllamaInstaller.swift` | 133 | Downloads, unpacks, signature-checks and opens the official Ollama app |
@@ -111,6 +116,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 
 | File | L | Purpose |
 |---|---|---|
+| `Views/MessengerView.swift` | 175 | MessengerDesk conversation page, review/send controls and explicit per-chat automatic consent |
 | `Views/ContentView.swift` | 350 | Root split view (`MainPage`: dashboard/settings/ask/aiApps/meeting) + empty state + corner bug button; shows the Profiles 2.0 screen once; profile review sheet + suggestion banner; opens a call that just stopped + `CallFinishedSheet` (title, note) |
 | `Views/SidebarView.swift` | 390 | Meeting list, rows, talk-ratio strip; search runs as one database query per pause in typing (never in `body`) |
 | `Views/DashboardView.swift` | 420 | Landing stats, recent meetings and explicit screen-analysis consent |
@@ -125,25 +131,24 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Views/BugReportSheet.swift` | 150 | Bug/idea report form + the corner ladybug button |
 | `Views/ReportContentView.swift` | 550 | Report section cards, scorecard rows, talk-ratio bar, prose parser (incl. one-line local reports; knows the meeting's template titles), receipt chips + popover |
 | `Views/SentimentStripView.swift` | 60 | Sentiment gauge strip |
-| `Views/SettingsView.swift` | 900 | All settings sections and provider keys (Knowledge lives in `KnowledgeSettingsView`) |
+| `Views/SettingsView.swift` | 900 | Settings sections, enabled assistant connections and local speech models (Knowledge lives in `KnowledgeSettingsView`) |
 | `Views/ProfilesSettingsView.swift` | 770 | Call-profile editor: kinds, gauges, icon picker; read-only list of documents a profile can use; hosts the Report card; Share / Export / Import (button + drop), Saved Versions (restore) |
 | `Views/ProfileReportCard.swift` | 360 | Profile editor → Report: report choice menu, sections (title, what goes here, paragraph/bullets/scorecard + criteria, promises), coaching on/off + role + focus, the built-in report offer |
 | `Views/ProfileReviewView.swift` | 250 | Review screen for imported files and AI suggestions (source, reason, grouped changes, privacy line, Apply / Save as new / Discard) + the suggestion banner |
 | `Views/ProfileShareViews.swift` | 130 | `.parrotprofile` UTType, share-sheet export, Export sheet (what the file holds, its text, Save…), queuing imported files |
 | `Views/RewriteReportSheet.swift` | 130 | Meeting page → Rewrite Report… sheet (pick a profile, progress, cancel) and the "Rewritten with…" Undo banner |
 | `Views/ProfileMigrationView.swift` | 120 | One-time "Reports can now match each call type" screen after the Profiles 2.0 update: a switch per built-in, backup link |
-| `Views/OnboardingView.swift` | 182 | Setup sheet shell: step routing, footer, 600×680; PermissionRow, ModelOption |
-| `Views/Onboarding/OnboardingModel.swift` | 81 | Sheet state (mode, path, step, switch, key results); move/decide later/finish |
+| `Views/OnboardingView.swift` | 182 | Setup sheet shell: isolated-defaults injection, step routing, footer, 600×680; PermissionRow, ModelOption |
+| `Views/Onboarding/OnboardingModel.swift` | 81 | Sheet state, enabled integrations, saved progress and Assistant switch |
 | `Views/Onboarding/OnboardingParts.swift` | 140 | Shared rows and cards: StepHeader, CopilotHeroCard, DownloadRow, PendingRow, SpeechDownloadRow |
 | `Views/Onboarding/WelcomeStep.swift` | 22 | Welcome step |
 | `Views/Onboarding/PermissionsStep.swift` | 120 | Permissions step |
 | `Views/Onboarding/MeetCopilotStep.swift` | 111 | Meet Copilot step: example call + benefits |
-| `Views/Onboarding/CopilotPathStep.swift` | 86 | Private / Balanced / Cloud / Decide later choice |
+| `Views/Onboarding/CopilotPathStep.swift` | 86 | Multi-select assistant connections shared with Settings, CLI setup links and privacy hold |
 | `Views/Onboarding/SpeechModelStep.swift` | 82 | Speech model step (pick from languages, past calls and memory; starts download) |
-| `Views/Onboarding/CopilotSetupStep.swift` | 164 | Copilot path setup: Ollama install/pull, Claude/Deepgram key fields |
-| `Views/Onboarding/KeyCheckField.swift` | 83 | One provider key field + Check key button and result |
+| `Views/Onboarding/CopilotSetupStep.swift` | 164 | Optional Ollama install and model download setup |
 | `Views/Onboarding/AutomaticStep.swift` | 104 | In-progress step while a path finishes on its own |
-| `Views/Onboarding/AIAppsStep.swift` | 110 | Claude/Cursor/Codex step before Ready (not on the Private path): honest "not private" note, Connect Claude |
+| `Views/Onboarding/AIAppsStep.swift` | 110 | Optional inbound desktop MCP connection, separate from CLI background assistance |
 | `Views/Onboarding/ReadyStep.swift` | 70 | Final "Ready" screen |
 | `Views/ModelDownloadProgressView.swift` | 34 | Whisper model download progress bar |
 | `Views/OllamaModelStatusView.swift` | 65 | Settings → Copilot model status, a thin view over OllamaService |

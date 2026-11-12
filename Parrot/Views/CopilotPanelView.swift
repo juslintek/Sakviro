@@ -134,10 +134,10 @@ struct CopilotPanelView: View {
         switch engine.status {
         case .needsAPIKey:
             VStack(spacing: 12) {
-                Image(systemName: "key.fill")
+                Image(systemName: "person.crop.circle.badge.plus")
                     .font(.appTitle2)
                     .foregroundStyle(Theme.Colors.ink2)
-                Text("The Assistant needs a Claude API key to suggest answers in real time.")
+                Text("Enable an assistant connection in Settings → Assistant to get live suggestions.")
                     .font(.appCallout)
                     .foregroundStyle(Theme.Colors.ink2)
                     .multilineTextAlignment(.center)

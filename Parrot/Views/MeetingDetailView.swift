@@ -169,7 +169,7 @@ struct MeetingDetailView: View {
             stopPlayback()
             // Renamed voices, moved or trimmed lines: refresh this meeting's
             // Ask Parrot index (a no-op when nothing changed).
-            if meeting.status == .done, !meeting.isDeleted {
+            if !meeting.isDeleted, meeting.modelContext != nil, meeting.status == .done {
                 let memory = recordingManager.memory
                 let m = meeting
                 Task { await memory.index(m) }

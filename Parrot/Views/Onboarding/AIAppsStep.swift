@@ -1,9 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Claude, Cursor and Codex, just before Ready. Honest up front: this is the
-/// one part of Parrot where what's read goes to another company. Never shown
-/// on the Private path (see OnboardingFlow.steps). Continue skips it.
+/// Optional inbound MCP access for desktop assistants.
 struct AIAppsStep: View {
     @AppStorage(MCPServer.enabledKey) private var enabled = false
     @State private var connected = false
@@ -20,7 +18,7 @@ struct AIAppsStep: View {
         VStack(spacing: 18) {
             Spacer()
             StepHeader(title: "Use your meetings in Claude",
-                       subtitle: "Ask Claude, Cursor or Codex about your calls. Your own plan does the thinking.")
+                       subtitle: "Optional. Let Claude Desktop, Cursor or Codex read saved meetings through MCP.")
 
             HStack(spacing: 10) {
                 ForEach(Self.apps, id: \.name) { app in appChip(app.name, bundleID: app.bundleID) }
@@ -39,7 +37,7 @@ struct AIAppsStep: View {
                 Image(systemName: "info.circle")
                     .foregroundStyle(Theme.Colors.ink2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Not private like the rest of \(MeetingActions.appName)")
+                    Text("Separate from background assistance")
                         .font(Theme.Typography.cardTitle)
                     Text("When you ask, what the app reads goes to its company (Anthropic, OpenAI or Cursor's AI provider) under your account. It stays off until you connect, and never sees audio, API keys or on-device-only meetings.")
                         .font(Theme.Typography.secondary)

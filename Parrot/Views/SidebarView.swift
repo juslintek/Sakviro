@@ -52,6 +52,10 @@ struct SidebarView: View {
                     page = .aiApps
                 }
                 .help("Use your meetings in Claude, Codex or Cursor")
+                NavRow(title: "Messenger", icon: "bubble.left.and.bubble.right", selected: page == .messenger) {
+                    page = .messenger
+                    selectedMeeting = nil
+                }
             }
             .padding(.horizontal, 8)
 

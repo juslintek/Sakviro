@@ -46,6 +46,7 @@ extension RecordingManager {
         let draft = try await CloudGate.$scopeLocal.withValue(!CloudGate.mayLeaveMac(meeting) || CloudGate.forcesLocal) {
             try await provider.complete(system: FollowUpEmail.systemPrompt, user: user, maxTokens: 900)
         }
+        guard !meeting.isDeleted, meeting.modelContext != nil else { throw CancellationError() }
         meeting.followUpEmail = draft
         try? modelContext?.save()
     }

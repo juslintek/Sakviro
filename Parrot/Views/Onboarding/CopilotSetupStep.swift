@@ -1,50 +1,14 @@
 import SwiftUI
 
-/// Gets Copilot running for the chosen path. The Copilot card on top holds
-/// the switch; the rows below differ per path.
+/// Optional local Assistant model setup.
 struct CopilotSetupStep: View {
-    @Environment(OnboardingModel.self) private var model
-
     var body: some View {
-        @Bindable var model = model
-        VStack(spacing: 14) {
-            StepHeader(title: "Set up the Assistant")
-            CopilotHeroCard(title: "Assistant", subtitle: heroLine) {
-                Toggle("Assistant", isOn: $model.copilotOn)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-            }
-            switch model.path {
-            case .private?:
+        ScrollView {
+            VStack(spacing: Theme.Metrics.pad) {
+                StepHeader(title: "Set up Ollama", subtitle: "Runs the Assistant on this Mac.")
                 OllamaSetupRows()
-            case .balanced?:
-                KeyCheckField(service: .claude, label: "Claude API key", placeholder: "sk-ant-…",
-                              hint: "Get a key at console.anthropic.com. Saved in your macOS keychain.",
-                              result: $model.claudeCheck)
-                Text("Claude also writes your after-call reports.")
-                    .font(Theme.Typography.secondary)
-                    .foregroundStyle(Theme.Colors.ink2)
-            case .cloud?:
-                KeyCheckField(service: .claude, label: "Claude API key", placeholder: "sk-ant-…",
-                              hint: "Get a key at console.anthropic.com.", result: $model.claudeCheck)
-                KeyCheckField(service: .deepgram, label: "Deepgram API key", placeholder: "40-character key",
-                              hint: "New accounts get $200 free credit. console.deepgram.com",
-                              optional: true, result: $model.deepgramCheck)
-                if model.mode == .full { SpeechDownloadRow(backup: true) }
-            case .cli?, .later?, nil:
-                EmptyView()  // routing never shows this step without a path
             }
-        }
-        .frame(maxWidth: 480)
-        .padding(Theme.Metrics.pad)
-    }
-
-    private var heroLine: String {
-        switch model.path {
-        case .private?: "Runs on this Mac with Ollama. Private and free."
-        case .balanced?: "Uses Claude. Only text is sent, audio never leaves this Mac."
-        case .cloud?: "Claude gives answers. Deepgram writes the words live."
-        case .cli?, .later?, nil: ""
+            .padding(Theme.Metrics.pad)
         }
     }
 }

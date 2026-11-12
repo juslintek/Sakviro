@@ -3,7 +3,7 @@ import SwiftData
 
 /// What the main window's detail area shows. One value instead of flags,
 /// so two pages can never both be "on".
-enum MainPage: Equatable { case dashboard, settings, ask, aiApps, meeting }
+enum MainPage: Equatable { case dashboard, settings, ask, aiApps, messenger, meeting }
 
 struct ContentView: View {
     @Environment(RecordingManager.self) private var recordingManager
@@ -26,6 +26,7 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var selectedMeeting: Meeting?
     @State private var page: MainPage = .dashboard
+    @State private var messenger = MessengerService()
     @State private var searchText = ""
     @State private var hasLoadedModel = false
     /// File → Import Audio… (⌘O); the dashboard has its own importer button.
@@ -54,6 +55,8 @@ struct ContentView: View {
                 settingsPane
             } else if page == .aiApps {
                 AIAppsPageView()
+            } else if page == .messenger {
+                MessengerView(service: messenger)
             } else if page == .dashboard {
                 DashboardView(selectedMeeting: $selectedMeeting, page: $page)
             } else if let meeting = selectedMeeting {
@@ -115,6 +118,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showBugReport) {
             BugReportSheet(screenshot: reportScreenshot)
+        }
+        .alert("Meeting deletion", isPresented: Binding(
+            get: { recordingManager.deletionFailure != nil },
+            set: { if !$0 { recordingManager.deletionFailure = nil } }
+        )) {
+            Button("OK") { recordingManager.deletionFailure = nil }
+        } message: {
+            Text(recordingManager.deletionFailure ?? "")
         }
         // Files the user opened, dropped or imported go straight to review.
         .onChange(of: appSession.profileReviews) { _, _ in reviewNextFile() }

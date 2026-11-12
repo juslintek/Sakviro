@@ -1,91 +1,107 @@
 import SwiftUI
 
-/// Private / Balanced / Cloud, plus Decide later on the full tour.
 struct CopilotPathStep: View {
     @Environment(OnboardingModel.self) private var model
-    @AppStorage(CloudGate.globalKey) private var onDeviceOnly = false
 
     var body: some View {
-        VStack(spacing: 14) {
-            StepHeader(title: "How should the Assistant work?",
-                       subtitle: "Pick how private you want it. You can change this later.")
-            VStack(spacing: 10) {
-                card(.private, icon: "lock", title: "Private",
-                     detail: "The Assistant runs on this Mac. Nothing leaves it. Free. Uses the Ollama app.")
-                card(.balanced, icon: "slider.horizontal.3", title: "Balanced",
-                     detail: "Audio stays on this Mac. Only text goes to Claude. Smartest answers. Needs a Claude key.",
-                     badge: "Recommended")
-                card(.cloud, icon: "cloud", title: "Cloud",
-                     detail: "Live word-by-word text plus Claude. Needs Deepgram and Claude keys.")
-                if CopilotProviderKind.selected.isCLI {
-                    card(.cli, icon: "terminal", title: "Keep \(CopilotProviderKind.selected.label)",
-                         detail: "Audio stays on this Mac. Meeting text goes to your CLI account's service. Your configured Assistant setting stays the same.")
-                }
-            }
-            .frame(maxWidth: 480)
-            if onDeviceOnly {
-                Text("Cloud choices are off because On-device only is on in Settings → Privacy.")
+        @Bindable var model = model
+        ScrollView {
+            VStack(spacing: Theme.Metrics.pad) {
+                StepHeader(title: "Connect your assistants",
+                           subtitle: "Enable one or several. The Assistant chooses an available connection for each request.")
+                Toggle("Enable the Assistant during recordings", isOn: $model.copilotOn)
+                    .toggleStyle(.switch)
+                AssistantIntegrationsView(enabledIntegrations: $model.enabledIntegrations)
+                Text("You can continue without a connection and add one later in Settings → Assistant.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.ink2)
             }
-            if model.mode == .full {
-                Button("Decide later") { withAnimation { model.decideLater() } }
-                    .buttonStyle(.link)
-            }
-            if let error = model.pathError {
-                Text(error)
-                    .font(Theme.Typography.secondary)
-                    .foregroundStyle(Theme.Colors.stop)
-            }
+            .padding(Theme.Metrics.pad)
         }
-        .padding(Theme.Metrics.pad)
+    }
+}
+
+struct AssistantIntegrationsView: View {
+    @Binding var enabledIntegrations: String
+    @AppStorage(CloudGate.globalKey) private var onDeviceOnly = false
+
+    private func enabled(_ kind: CopilotProviderKind) -> Binding<Bool> {
+        Binding(get: { enabledIntegrations.split(separator: ",").contains(Substring(kind.rawValue)) }, set: { enabled in
+            var kinds = enabledIntegrations.split(separator: ",").map(String.init)
+            kinds.removeAll { $0 == kind.rawValue }
+            if enabled { kinds.append(kind.rawValue) }
+            enabledIntegrations = kinds.joined(separator: ",")
+        })
     }
 
-    private func card(_ path: CopilotPath, icon: String, title: String, detail: String,
-                      badge: String? = nil) -> some View {
-        let locked = onDeviceOnly && path != .private
-        let selected = model.path == path
-        let shape = RoundedRectangle(cornerRadius: Theme.Metrics.cardRadius)
-        return Button { model.path = path } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: icon)
-                    .font(.appTitle3)
-                    .foregroundStyle(selected ? Theme.Colors.accent : Theme.Colors.ink)
-                    .frame(width: 26)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(title)
-                            .font(Theme.Typography.heroTitle)
-                        if let badge {
-                            Text(badge)
-                                .font(Theme.Typography.caption)
-                                .foregroundStyle(Theme.Colors.accent)
-                                .padding(.horizontal, Theme.Metrics.chipInsetH)
-                                .padding(.vertical, Theme.Metrics.chipInsetV)
-                                .background(Theme.Colors.spotlight, in: Capsule())
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.pad) {
+            Text("Audio and transcription stay on this Mac. Enabled account connections receive meeting text and, when supported and allowed, selected-window images.")
+                .font(Theme.Typography.secondary)
+                .foregroundStyle(Theme.Colors.ink2)
+            if onDeviceOnly {
+                Label("On-device only is on. Account connections stay selected but are held until you change Settings → Privacy. Ollama can still run locally.", systemImage: "lock.shield")
+                    .font(Theme.Typography.secondary)
+            }
+            ForEach(AssistantRoutingSettings.availableKinds) { kind in
+                VStack(alignment: .leading, spacing: Theme.Metrics.controlGap) {
+                    Toggle(title(kind), isOn: enabled(kind))
+                        .toggleStyle(.checkbox)
+                        .font(Theme.Typography.cardTitle)
+                    Text(detail(kind))
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.ink2)
+                    if let setupURL = setupURL(kind) {
+                        Link("Install and sign in", destination: setupURL)
+                            .font(Theme.Typography.caption)
+                    }
+                    if enabled(kind).wrappedValue && kind.isCLI {
+                        DisclosureGroup("Connection and model settings") {
+                            CLIProviderSettings(kind: kind)
                         }
                     }
-                    Text(detail)
-                        .font(Theme.Typography.secondary)
-                        .foregroundStyle(Theme.Colors.ink2)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
-                if selected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Theme.Colors.accent)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
             }
-            .padding(Theme.Metrics.popoverPad)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Theme.Colors.spotlight : .clear, in: shape)
-            .overlay(shape.stroke(selected ? Theme.Colors.spotlightLine : Theme.Colors.line,
-                                  lineWidth: selected ? 1.5 : 1))
-            .contentShape(shape)
+            Text("Sign in through each CLI before using it. Check verifies installation. Sign-in and plan limits are confirmed when a request runs. If a connection fails, the Assistant tries another enabled connection that supports the request.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.ink2)
+            Text("Claude Desktop and other desktop MCP connectors let you ask those apps about saved meetings. Background assistance uses the CLI connections above.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.ink2)
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .disabled(locked)
-        .opacity(locked ? 0.45 : 1)
+    }
+
+    private func setupURL(_ kind: CopilotProviderKind) -> URL? {
+        switch kind {
+        case .claudeCode: URL(string: "https://code.claude.com/docs/en/quickstart")
+        case .codex: URL(string: "https://developers.openai.com/codex/auth/")
+        case .gemini: URL(string: "https://geminicli.com/docs/get-started/authentication/")
+        case .copilot: URL(string: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli")
+        case .ollama: OllamaInstaller.websiteURL
+        default: nil
+        }
+    }
+
+    private func title(_ kind: CopilotProviderKind) -> String {
+        switch kind {
+        case .claudeCode: "Claude / Claude Code"
+        case .codex: "ChatGPT / Codex"
+        case .gemini: "Gemini"
+        default: kind.label
+        }
+    }
+
+    private func detail(_ kind: CopilotProviderKind) -> String {
+        switch kind {
+        case .claudeCode: "Uses your signed-in Claude Code CLI. Supports meeting text and selected-window images."
+        case .codex: "Uses Codex CLI with your ChatGPT account. Supports meeting text and selected-window images."
+        case .gemini: "Uses your signed-in Gemini CLI. This connection supports text only."
+        case .copilot: "Uses your signed-in GitHub Copilot CLI. Supports meeting text and selected-window images."
+        case .customCLI: "Use a trusted local CLI executable. This connection supports text only."
+        case .ollama: "Runs on this Mac. Download and start a model in the next setup step or Settings."
+        default: ""
+        }
     }
 }

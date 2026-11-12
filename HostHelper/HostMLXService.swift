@@ -17,11 +17,41 @@ final class HostMLXService {
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
+    private var stdoutRemainder = Data()
     private var python = ""
     private var pending: Set<String> = []
     private var cancelled: Set<String> = []
     private var active: String?
     private var activeUsesWorker = false
+    private var memoryPressure: DispatchSourceMemoryPressure?
+    // Preserve pressure events while accepted requests are still waiting.
+    private var releaseRequested = false
+
+    init() {
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global(qos: .utility))
+        pressure.setEventHandler { [weak self] in self?.releaseForMemoryPressure() }
+        memoryPressure = pressure
+        pressure.resume()
+    }
+
+    deinit { memoryPressure?.cancel() }
+
+    func releaseForMemoryPressure() {
+        queue.async {
+            self.releaseRequested = true
+            self.releaseWorkerIfIdle()
+        }
+    }
+
+    private func releaseWorkerIfIdle() {
+        guard releaseRequested else { return }
+        lock.lock()
+        let idle = pending.isEmpty
+        lock.unlock()
+        guard idle else { return }
+        releaseRequested = false
+        stopWorker()
+    }
 
     func perform(_ requestData: Data, reply: @escaping (Data?, String?) -> Void) {
         guard requestData.count <= 3_000_000,
@@ -48,6 +78,7 @@ final class HostMLXService {
                 self.active = nil
                 self.activeUsesWorker = false
                 self.lock.unlock()
+                self.releaseWorkerIfIdle()
             }
             self.lock.lock()
             let wasCancelled = self.cancelled.contains(identifier)
@@ -55,6 +86,7 @@ final class HostMLXService {
             self.activeUsesWorker = action != "probe"
             self.lock.unlock()
             guard !wasCancelled else { reply(nil, "MLX request cancelled"); return }
+            var shouldStopWorkerOnCatch = action != "probe"
             do {
                 if action == "unload" {
                     self.stopWorker()
@@ -78,13 +110,17 @@ final class HostMLXService {
                       executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable),
                       let model = request["model"] as? String, model.hasPrefix("/"),
                       FileManager.default.fileExists(atPath: model) else {
+                    shouldStopWorkerOnCatch = false
                     throw Failure.message("Choose a Python executable and local MLX model folder")
                 }
                 try self.startWorker(executable)
                 self.lock.lock()
                 let cancelledBeforeStart = self.cancelled.contains(identifier)
                 self.lock.unlock()
-                guard !cancelledBeforeStart else { throw Failure.message("MLX request cancelled") }
+                guard !cancelledBeforeStart else {
+                    shouldStopWorkerOnCatch = false
+                    throw Failure.message("MLX request cancelled")
+                }
                 let timer = DispatchSource.makeTimerSource(queue: .global())
                 timer.schedule(deadline: .now() + 180)
                 timer.setEventHandler { self.cancel(identifier) }
@@ -92,25 +128,20 @@ final class HostMLXService {
                 defer { timer.cancel() }
                 guard let input = self.input, let output = self.output else { throw Failure.message("MLX worker unavailable") }
                 try input.write(contentsOf: requestData + Data([10]))
-                var response = Data()
-                while response.count < 1_000_000 {
-                    guard let byte = try output.read(upToCount: 1), !byte.isEmpty else {
-                        throw Failure.message("MLX worker stopped unexpectedly")
-                    }
-                    if byte[0] == 10 { break }
-                    response.append(byte)
-                }
-                guard response.count < 1_000_000,
-                      let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
+                let response = try self.readLine(from: output, maxBytes: 1_000_000)
+                guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
                       let ok = object["ok"] as? Bool else { throw Failure.message("Invalid MLX worker response") }
-                if !ok { throw Failure.message(object["error"] as? String ?? "MLX transcription failed") }
                 self.lock.lock()
                 let wasCancelled = self.cancelled.contains(identifier)
                 self.lock.unlock()
                 guard !wasCancelled else { throw Failure.message("MLX request cancelled or timed out") }
+                if !ok {
+                    shouldStopWorkerOnCatch = false
+                    throw Failure.message(object["error"] as? String ?? "MLX transcription failed")
+                }
                 reply(response, nil)
             } catch {
-                if action != "probe" { self.stopWorker() }
+                if shouldStopWorkerOnCatch { self.stopWorker() }
                 reply(nil, error.localizedDescription)
             }
         }
@@ -147,6 +178,33 @@ final class HostMLXService {
         python = executable
     }
 
+    private func readLine(from output: FileHandle, maxBytes: Int) throws -> Data {
+        let fd = output.fileDescriptor
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while true {
+            if let newlineIndex = stdoutRemainder.firstIndex(of: 10) {
+                let line = Data(stdoutRemainder[..<newlineIndex])
+                stdoutRemainder.removeSubrange(...newlineIndex)
+                guard line.count < maxBytes else {
+                    throw Failure.message("Invalid MLX worker response")
+                }
+                return line
+            }
+            guard stdoutRemainder.count < maxBytes else {
+                throw Failure.message("Invalid MLX worker response")
+            }
+            let count = Darwin.read(fd, &chunk, chunk.count)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw Failure.message("MLX worker stopped unexpectedly")
+            }
+            guard count > 0 else {
+                throw Failure.message("MLX worker stopped unexpectedly")
+            }
+            stdoutRemainder.append(chunk, count: count)
+        }
+    }
+
     private func stopWorker() {
         lock.lock()
         let worker = process
@@ -160,6 +218,7 @@ final class HostMLXService {
         try? output?.close()
         input = nil
         output = nil
+        stdoutRemainder.removeAll(keepingCapacity: false)
         python = ""
     }
 

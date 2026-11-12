@@ -4,7 +4,12 @@ struct OnboardingView: View {
     @Binding var isPresented: Bool
     /// Rebuilt each time the sheet is presented, so it reads the current
     /// mode (full tour or Set up Copilot) and saved step.
-    @State private var model = OnboardingModel()
+    @State private var model: OnboardingModel
+
+    init(isPresented: Binding<Bool>, defaults: UserDefaults = .standard) {
+        _isPresented = isPresented
+        _model = State(initialValue: OnboardingModel(defaults: defaults))
+    }
 
     var body: some View {
         VStack(spacing: 0) {

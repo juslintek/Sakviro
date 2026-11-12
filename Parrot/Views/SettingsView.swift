@@ -16,7 +16,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .recording: "Recording"
         case .transcription: "Transcription"
         case .copilot: "Assistant"
-        case .apiKeys: "API Keys"
+        case .apiKeys: "Assistant"
         case .knowledge: "Knowledge"
         case .profiles: "Profiles"
         case .connections: "Connections"
@@ -53,25 +53,14 @@ struct SettingsView: View {
     @Environment(RecordingManager.self) private var recordingManager
     @AppStorage("whisperModel") private var selectedModel = "base"
     @AppStorage("speechModelAuto.local") private var localSpeechAuto = false
-    @AppStorage("speechModelAuto.groq") private var groqSpeechAuto = false
-    @AppStorage("speechModelAuto.deepgram") private var deepgramSpeechAuto = false
-    @AppStorage("speechModel.groq") private var groqSpeechModel = "whisper-large-v3-turbo"
-    @AppStorage("speechModel.deepgram") private var deepgramSpeechModel = "nova-3"
     @AppStorage("appearance") private var appearance = Appearance.system
     @AppStorage(ParrotAppDelegate.hideDockKey) private var hideDock = false
     @AppStorage("copilotEnabled") private var copilotEnabled = false
     @AppStorage(LiveNudgeSession.defaultsKey) private var liveNudges = true
-    @AppStorage("copilotProvider") private var copilotProvider = CopilotProviderKind.claude.rawValue
+    @AppStorage(AssistantRoutingSettings.enabledKey) private var enabledIntegrations = ""
     @AppStorage("copilotPace") private var copilotPace = CopilotPace.fast.rawValue
     @AppStorage("copilotWindow") private var copilotWindow = CopilotWindow.standard.rawValue
-    /// "" = same backend as live cards.
-    @AppStorage("reportsProvider") private var reportsProvider = ""
-    /// "" = same backend as reports.
-    @AppStorage("askProvider") private var askProvider = ""
-    @AppStorage(ClaudeAnalysisProvider.modelKey) private var claudeModel = ""
     @AppStorage("copilotOllamaModel") private var copilotOllamaModel = "llama3.2:3b"
-    @AppStorage("copilotCustomBaseURL") private var copilotCustomBaseURL = ""
-    @AppStorage("copilotCustomModel") private var copilotCustomModel = ""
     /// True after picking "Custom…" in the Ollama model dropdown, so the free
     /// text field stays visible even while the typed name matches nothing.
     @State private var ollamaCustomModelEditing = false
@@ -82,10 +71,9 @@ struct SettingsView: View {
         transcriptionLanguage == "auto" || LanguageRouter.parakeetLanguages.contains(transcriptionLanguage)
     }
     @AppStorage(VideoCaptureService.enabledKey) private var recordVideo = false
+    @AppStorage(VideoArchivePreset.defaultsKey) private var videoArchivePreset = VideoArchivePreset.efficient1080p15.rawValue
     @AppStorage("echoCancellationEnabled") private var echoCancellation = true
-    @AppStorage(TranscriptionBackend.defaultsKey) private var transcriptionBackend = TranscriptionBackend.local.rawValue
     @AppStorage("polishAfterCall") private var polishAfterCall = false
-    @AppStorage(TranscriptPolisher.onDeviceKey) private var polishOnDevice = false
     @AppStorage("livePreview") private var livePreview = true
     @State private var section: SettingsSection = .general
     @State private var diarizerDownloading = false
@@ -136,8 +124,8 @@ struct SettingsView: View {
     /// a single onChange instead of one per field.
     private var settingsFingerprint: String {
         "\(selectedModel)|\(appearance)|\(copilotEnabled)|\(transcriptionLanguage)|"
-            + "\(customVocabulary)|\(echoCancellation)|\(transcriptionBackend)|\(polishAfterCall)|\(polishOnDevice)|"
-            + "\(copilotPace)|\(copilotWindow)|\(livePreview)"
+            + "\(customVocabulary)|\(echoCancellation)|\(polishAfterCall)|"
+            + "\(copilotPace)|\(copilotWindow)|\(livePreview)|\(enabledIntegrations)"
     }
 
     private func flashSavedToast() {
@@ -157,7 +145,7 @@ struct SettingsView: View {
         HStack(spacing: 0) {
             // MARK: Section nav
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(SettingsSection.allCases) { item in
+                ForEach(SettingsSection.allCases.filter { $0 != .apiKeys }) { item in
                     SettingsNavRow(title: item.title, icon: item.icon, selected: section == item) {
                         section = item
                     }
@@ -186,7 +174,7 @@ struct SettingsView: View {
                 case .recording: recordingPage
                 case .transcription: transcriptionPage
                 case .copilot: copilotPage
-                case .apiKeys: apiKeysPage
+                case .apiKeys: copilotPage
                 case .knowledge: KnowledgeSettingsView()
                 case .profiles: ProfilesSettingsView()
                 case .connections: ConnectionsSettingsPage()
@@ -196,7 +184,10 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .formStyle(.grouped)
-        .onAppear { consumeRequestedSection() }
+        .onAppear {
+            AssistantRoutingSettings.migrate()
+            consumeRequestedSection()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .parrotOpenSettingsSection)) { _ in
             consumeRequestedSection()
         }
@@ -337,6 +328,18 @@ struct SettingsView: View {
                     first: true,
                     isOn: $recordVideo
                 )
+                if recordVideo {
+                    SettingsLabeledRow(title: "Video quality", detail: "Lower resolution and frame rate keep your Mac cool during long calls.") {
+                        Picker("Video quality", selection: $videoArchivePreset) {
+                            ForEach(VideoArchivePreset.allCases) { preset in
+                                Text(preset.label).tag(preset.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                }
             }
 
             CallDetectionCard()
@@ -361,22 +364,8 @@ struct SettingsView: View {
         SettingsPage {
             SettingsCard(title: "Engine") {
                 SettingsBlockRow(title: "Engine", first: true) {
-                    Picker("", selection: $transcriptionBackend) {
-                        Text("On-device — private, free").tag(TranscriptionBackend.local.rawValue)
-                        Text("Groq cloud — big-model accuracy, ~$0.08/hr").tag(TranscriptionBackend.groq.rawValue)
-                        Text("Deepgram cloud — word-by-word streaming, ~$0.70/hr").tag(TranscriptionBackend.deepgram.rawValue)
-                    }
-                    .pickerStyle(.radioGroup)
-                    .labelsHidden()
-
-                    if transcriptionBackend == TranscriptionBackend.local.rawValue {
-                        Hint("Every second of audio stays on this Mac.")
-                    } else {
-                        HStack(spacing: 10) {
-                            Hint("Cloud engines need a key, and fall back to on-device if it's missing.")
-                            Button("Open API Keys") { section = .apiKeys }
-                        }
-                    }
+                    Text("On-device")
+                    Hint("Every second of audio stays on this Mac.")
                 }
                 SettingsToggleRow(
                     title: "Polish transcript after each call",
@@ -384,17 +373,7 @@ struct SettingsView: View {
                     isOn: $polishAfterCall
                 )
                 if polishAfterCall {
-                    SettingsBlockRow(title: "Polish with") {
-                        Picker("", selection: $polishOnDevice) {
-                            Text("Groq cloud — large model, ~$0.08/hr").tag(false)
-                            Text("This Mac — private, free, takes a few minutes").tag(true)
-                        }
-                        .pickerStyle(.radioGroup)
-                        .labelsHidden()
-                        Hint(polishOnDevice
-                             ? "Uses your on-device model below. Nothing leaves this Mac."
-                             : "Needs a Groq key. Calls set to on-device only skip it.")
-                    }
+                    SettingsRow { Hint("Polish uses your on-device model below.") }
                 }
                 SettingsToggleRow(
                     title: "Show words as they're spoken",
@@ -403,28 +382,6 @@ struct SettingsView: View {
                 )
             }
 
-            if transcriptionBackend == TranscriptionBackend.groq.rawValue {
-                SettingsCard(title: "Groq Live Transcription Model") {
-                    SettingsToggleRow(title: "Auto", detail: "Choose a model from the call brief. Changes apply to the next recording; polish uses its own model.", isOn: $groqSpeechAuto)
-                    SettingsBlockRow(title: "Manual model") {
-                        Picker("", selection: $groqSpeechModel) {
-                            Text("Whisper Large V3 Turbo").tag("whisper-large-v3-turbo")
-                            Text("Whisper Large V3").tag("whisper-large-v3")
-                        }.labelsHidden().pickerStyle(.radioGroup)
-                        .onChange(of: groqSpeechModel) { _, _ in groqSpeechAuto = false }
-                    }
-                }
-            }
-            if transcriptionBackend == TranscriptionBackend.deepgram.rawValue {
-                SettingsCard(title: "Deepgram Live Transcription Model") {
-                    SettingsToggleRow(title: "Auto", detail: "Uses Nova-3. Changes apply to the next recording.", isOn: $deepgramSpeechAuto)
-                    SettingsBlockRow(title: "Manual model ID") {
-                        TextField("nova-3", text: $deepgramSpeechModel)
-                            .onChange(of: deepgramSpeechModel) { _, _ in deepgramSpeechAuto = false }
-                        Hint("Default: nova-3. A custom model must support your selected language and streaming.")
-                    }
-                }
-            }
             SettingsCard(title: "On-Device Model") {
                 SettingsToggleRow(title: "Auto", detail: "Choose a downloaded model for the next recording or import using the language and call brief. Your manual choice is saved.", isOn: $localSpeechAuto)
                 SettingsBlockRow(title: "Manual model") {
@@ -541,14 +498,7 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .fixedSize()
                 }
-                if transcriptionBackend == TranscriptionBackend.deepgram.rawValue, transcriptionLanguage == "auto", !deepgramSpeechAuto, ["nova-2", "nova-2-general"].contains(deepgramSpeechModel) {
-                    SettingsRow {
-                        Label("Nova-2 auto-detect covers English and Spanish. Pick a language for other calls.",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(Theme.Typography.secondary)
-                            .foregroundStyle(Theme.Colors.warn)
-                    }
-                }
+
             }
 
             SettingsCard(title: "Custom Vocabulary") {
@@ -616,8 +566,7 @@ struct SettingsView: View {
     // MARK: - Copilot
 
     private var copilotPage: some View {
-        let liveKind = CopilotProviderKind(rawValue: copilotProvider) ?? .claude
-        return SettingsPage {
+        SettingsPage {
             SettingsCard(title: "Live Call Assistant") {
                 SettingsToggleRow(
                     title: "Enable the Assistant during recordings",
@@ -625,7 +574,7 @@ struct SettingsView: View {
                     first: true,
                     isOn: $copilotEnabled
                 )
-                SettingsLabeledRow(title: "Guided setup", detail: "Pick Private, Balanced or Cloud and get the Assistant running.") {
+                SettingsLabeledRow(title: "Guided setup", detail: "Enable account connections or run the Assistant on this Mac.") {
                     Button("Set up the Assistant") {
                         MeetingActions.showCopilotSetup()
                         if !isEmbedded { NSApp.keyWindow?.performClose(nil) }
@@ -634,6 +583,13 @@ struct SettingsView: View {
                 SettingsLabeledRow(title: "Call profiles", detail: "What it says and watches for is set per call profile.") {
                     Button("Open Profiles") { section = .profiles }
                 }
+            }
+
+            SettingsCard(title: "Connections", blurb: "Automatic routing is shared by live assistance, reports and Ask.") {
+                SettingsRow(first: true) { AssistantIntegrationsView(enabledIntegrations: $enabledIntegrations) }
+            }
+            if enabledIntegrations.split(separator: ",").contains("ollama") {
+                SettingsCard(title: "Ollama") { providerConfig(for: .ollama) }
             }
 
             SettingsCard(title: "Live Nudges") {
@@ -677,60 +633,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsCard(title: "Model") {
-                // Two jobs, two backends: live cards need speed and sharpness;
-                // reports run after the call where a slow local model costs nothing.
-                SettingsBlockRow(title: "Live cards", first: true) {
-                    Picker("", selection: $copilotProvider) {
-                        ForEach(CopilotProviderKind.allCases) { kind in
-                            Text(kind.label).tag(kind.rawValue)
-                        }
-                    }
-                    .pickerStyle(.radioGroup)
-                    .labelsHidden()
-                }
 
-                providerConfig(for: liveKind)
-
-                SettingsLabeledRow(
-                    title: "Post-call reports",
-                    detail: "Reports generate after the call, so a local model keeps them free and private without slowing live cards. If the reports backend isn't set up, reports fall back to the live one."
-                ) {
-                    Picker("", selection: $reportsProvider) {
-                        Text("Same as live cards").tag("")
-                        ForEach(CopilotProviderKind.allCases) { kind in
-                            Text(kind.label).tag(kind.rawValue)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                }
-
-                if let reportsKind = CopilotProviderKind(rawValue: reportsProvider), reportsKind != liveKind {
-                    providerConfig(for: reportsKind)
-                }
-
-                SettingsLabeledRow(
-                    title: "Ask \(MeetingActions.appName)",
-                    detail: "Answers questions about your past calls. Pick Ollama to keep them free and on this Mac. If this one isn't set up, Ask uses the reports AI."
-                ) {
-                    Picker("", selection: $askProvider) {
-                        Text("Same as reports").tag("")
-                        ForEach(CopilotProviderKind.allCases) { kind in
-                            Text(kind.label).tag(kind.rawValue)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                }
-
-                if let askKind = CopilotProviderKind(rawValue: askProvider), askKind != liveKind,
-                   askKind.rawValue != reportsProvider {
-                    providerConfig(for: askKind)
-                }
-            }
         }
     }
 
@@ -738,15 +641,6 @@ struct SettingsView: View {
     @ViewBuilder
     private func providerConfig(for kind: CopilotProviderKind) -> some View {
         switch kind {
-        case .claude:
-            SettingsLabeledRow(title: "Claude", detail: "Best quality. Needs a key. Transcript text is sent, audio never.") {
-                Button("Open API Keys") { section = .apiKeys }
-            }
-            ProviderModelSettings(model: $claudeModel, kind: .claude)
-            ProviderAutoModelSettings(kind: .claude, manual: $claudeModel)
-            SettingsRow {
-                Hint("Optional: add a TypeSafe key to show matching excerpts from your documents within a second of a question.")
-            }
         case .ollama:
             SettingsLabeledRow(
                 title: "Ollama model",
@@ -778,28 +672,8 @@ struct SettingsView: View {
             SettingsRow {
                 OllamaModelStatusView(model: copilotOllamaModel)
             }
-        case .custom:
-            SettingsLabeledRow(title: "Server URL") {
-                TextField("", text: $copilotCustomBaseURL, prompt: Text("https://openrouter.ai/api/v1"))
-                    .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-            }
-            SettingsLabeledRow(title: "Model") {
-                TextField("", text: $copilotCustomModel, prompt: Text("google/gemini-2.5-flash"))
-                    .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
-            }
-            ProviderAutoModelSettings(kind: .custom, manual: $copilotCustomModel)
-            SettingsRow {
-                ProviderKeyField(
-                    label: "API key",
-                    account: "custom-llm-api-key",
-                    placeholder: "optional — not needed for local servers",
-                    hint: "Any service that speaks the OpenAI API: OpenRouter, OpenAI, Gemini, Groq, LM Studio… Costs aren't estimated for these."
-                )
-            }
+        case .claude, .custom:
+            EmptyView()
         case .claudeCode, .codex, .gemini, .copilot, .customCLI:
             CLIProviderSettings(kind: kind).id(kind)
         }
@@ -828,57 +702,7 @@ struct SettingsView: View {
         ollamaCustomModelEditing || !OllamaCatalog.ids.contains(copilotOllamaModel)
     }
 
-    // MARK: - API Keys
 
-    private var apiKeysPage: some View {
-        SettingsPage {
-            SettingsCard(title: "Claude", blurb: "Powers the Assistant. Only transcript text is sent; audio never leaves your Mac.") {
-                SettingsRow(first: true) {
-                    ProviderKeyField(
-                        label: "Claude API key",
-                        account: nil,
-                        placeholder: "sk-ant-…",
-                        hint: "Keys: console.anthropic.com"
-                    )
-                }
-            }
-
-            SettingsCard(title: "Groq", blurb: "Cloud transcription and the post-call polish pass.") {
-                SettingsRow(first: true) {
-                    ProviderKeyField(
-                        label: "Groq API key",
-                        account: TranscriptionBackend.groq.keychainAccount!,
-                        placeholder: "gsk_…",
-                        hint: "Used when the Groq engine or polish is on. Keys: console.groq.com"
-                    )
-                }
-            }
-
-            SettingsCard(title: "Deepgram", blurb: "Streaming transcription, billed per audio track. New accounts include $200 credit.") {
-                SettingsRow(first: true) {
-                    ProviderKeyField(
-                        label: "Deepgram API key",
-                        account: TranscriptionBackend.deepgram.keychainAccount!,
-                        placeholder: "40-character hex key",
-                        hint: "Keys: console.deepgram.com"
-                    )
-                }
-            }
-
-            SettingsCard(title: "TypeSafe", blurb: "Instant answers from your documents while Claude is still writing.") {
-                SettingsRow(first: true) {
-                    ProviderKeyField(
-                        label: "TypeSafe API key",
-                        account: JevDocMatcher.keychainAccount,
-                        placeholder: "apikey_…",
-                        hint: "When the other side asks something your documents cover, the matching excerpt shows within about a second. Sends the question, a couple of lines of context and the matching document snippets to TypeSafe AI (hosted in the US). Audio never. Claude mode only. Keys: typesafe.ai"
-                    )
-                }
-            }
-
-            Hint("All keys are stored in your macOS keychain, never in the app's files.")
-        }
-    }
 }
 
 enum Appearance: String, CaseIterable {
@@ -954,63 +778,5 @@ struct Hint: View {
             .font(Theme.Typography.secondary)
             .foregroundStyle(Theme.Colors.ink2)
             .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Provider API key field
-
-/// Reusable BYO-key field: Keychain-backed, explicit Save, and a visible error
-/// when the write fails. `account: nil` targets the default (Claude) slot.
-struct ProviderKeyField: View {
-    let label: String
-    let account: String?
-    let placeholder: String
-    let hint: String
-
-    @State private var key: String
-    @State private var saved = false
-    @State private var failed = false
-
-    init(label: String, account: String?, placeholder: String, hint: String) {
-        self.label = label
-        self.account = account
-        self.placeholder = placeholder
-        self.hint = hint
-        let stored = account.map { APIKeyStore.load(account: $0) } ?? APIKeyStore.load()
-        _key = State(initialValue: stored ?? "")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SecureField(placeholder, text: $key, prompt: Text(placeholder))
-                .textFieldStyle(.roundedBorder)
-                .onChange(of: key) {
-                    saved = false
-                    failed = false
-                }
-
-            HStack {
-                Button("Save Key") {
-                    let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let ok = account.map { APIKeyStore.save(trimmed, account: $0) }
-                        ?? APIKeyStore.save(trimmed)
-                    failed = !ok
-                    saved = ok
-                }
-                .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                if saved {
-                    Label("Saved", systemImage: "checkmark.circle")
-                        .foregroundStyle(Theme.Colors.good)
-                        .font(Theme.Typography.secondary)
-                } else if failed {
-                    Label("Keychain rejected the key — try again", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(Theme.Colors.warn)
-                        .font(Theme.Typography.secondary)
-                }
-            }
-
-            Hint(hint)
-        }
     }
 }

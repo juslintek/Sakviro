@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="keywords" content="transcript, live, sentences, language, turkish, auto detect, wrong language, switch language, deepgram language, custom vocabulary, glossary, names, spelling, typing bubble, delay">
+<meta name="keywords" content="transcript, live, sentences, language, turkish, auto detect, wrong language, switch language, custom vocabulary, glossary, names, spelling, typing bubble, delay">
 <title>The live transcript</title>
 <link rel="canonical" href="https://openparrot.app/help/transcript.html">
 <!-- The guide's home is openparrot.app/help. GitHub Pages sends visitors there; the in-app copy stays put. -->
@@ -61,10 +61,6 @@ is: pick one Parakeet doesn't know and the call uses Whisper.</p>
 <p>Quickest of all: pick the <strong>Call language</strong> on the dashboard,
 under Start recording, before you hit record. With nothing to detect, the call
 gets the right engine from the first word.</p>
-<p>Using Deepgram? Its auto-detect only knows English, Spanish, French,
-German, Hindi, Russian, Portuguese, Japanese, Italian and Dutch. For Turkish,
-Arabic, Chinese or Korean calls, pick the language by name.</p>
-
 <h2>Teach it your words</h2>
 <p>Whisper has never met your company name. If the transcript keeps mangling
 names or jargon ("LaunchEase" becoming "Lawn Cheese" is a real example from
@@ -72,12 +68,11 @@ this very app's history), add those words in Settings → Transcription →
 Custom vocabulary, separated by commas. Parrot whispers them to the model on
 every pass so it spells them right.</p>
 
-<h2>Cloud engines, if you want them</h2>
-<p>On-device transcription is the default and needs no account. If you prefer, you
-can transcribe through Groq or stream through Deepgram with your own API keys
-in Settings → Transcription. If a cloud engine hiccups mid-call, Parrot
-quietly falls back to the on-device model for the affected part, so a flaky
-connection never costs you transcript.</p>
+<h2>On-device transcription and polish</h2>
+<p>Transcription runs on this Mac and needs no account. In Settings →
+Transcription, Auto can choose a downloaded model using the language and call
+brief, or you can select a manual model. Optional transcript polish also
+uses your on-device model to transcribe saved audio again before the report.</p>
 
 </body>
 </html>

@@ -423,7 +423,7 @@ enum HelpShots {
         rm.profileStore.seedAndMigrateIfNeeded(context: context, knowledgeBase: rm.knowledgeBase)
         UserDefaults.standard.register(defaults: [
             "copilotEnabled": true,
-            "copilotProvider": "claude",
+            AssistantRoutingSettings.enabledKey: "codex,gemini",
             "whisperModel": "large-v3-turbo",
             "onboardingStillFrame": true,
             // SpeechModelStep starts a real WhisperKit download on appear;
@@ -619,29 +619,36 @@ enum HelpShots {
                 .background(Theme.Colors.panel).modelContainer(container))
 
         // Onboarding, real sheet geometry (600x680): if a step ever outgrows
-        // it, these shots show the clipping before a user does. Repeated
-        // register(defaults:) calls replace the keys, picking step and path.
-        func onboarding(_ file: String, _ step: OnboardingStep, path: CopilotPath? = nil) {
-            UserDefaults.standard.register(defaults: [
+        // it, these shots show the clipping before a user does. Each sheet
+        // gets disposable defaults so saved progress cannot affect a fixture.
+        func onboarding(_ file: String, _ step: OnboardingStep, integrations: String = "codex,gemini") {
+            let suite = "parrot-help-onboarding-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.register(defaults: [
                 OnboardingMode.defaultsKey: OnboardingMode.full.rawValue,
                 OnboardingFlow.stepKey: step.rawValue,
-                CopilotPath.defaultsKey: path?.rawValue ?? "",
+                AssistantRoutingSettings.enabledKey: integrations,
+                "copilotEnabled": !integrations.isEmpty,
+                "onboardingNoAutoDownload": true,
             ])
             shot(file, size: .init(width: 600, height: 680),
-                 OnboardingView(isPresented: .constant(true))
+                 OnboardingView(isPresented: .constant(true), defaults: defaults)
+                    .defaultAppStorage(defaults)
+                    .background(Theme.Colors.canvas)
                     .environment(rm).environment(rm.profileStore)
                     .modelContainer(container))
         }
         onboarding("onboarding-permissions.png", .permissions)
         onboarding("onboarding-meet-copilot.png", .meetCopilot)
-        onboarding("onboarding-path.png", .copilotPath, path: .balanced)
-        onboarding("onboarding-model.png", .speechModel, path: .balanced)
-        onboarding("onboarding-setup-private.png", .copilotSetup, path: .private)
-        onboarding("onboarding-setup-balanced.png", .copilotSetup, path: .balanced)
-        onboarding("onboarding-setup-cloud.png", .copilotSetup, path: .cloud)
+        onboarding("onboarding-path.png", .copilotPath)
+        onboarding("onboarding-gemini.png", .copilotPath, integrations: "gemini")
+        onboarding("onboarding-model.png", .speechModel)
+        onboarding("onboarding-setup-local.png", .copilotSetup, integrations: "ollama")
         onboarding("onboarding-automatic.png", .automatic)
-        onboarding("onboarding-ai-apps.png", .aiApps, path: .balanced)
-        onboarding("onboarding-ready.png", .ready, path: .balanced)
+        onboarding("onboarding-ai-apps.png", .aiApps)
+        onboarding("onboarding-ready.png", .ready)
+        onboarding("onboarding-no-assistant.png", .ready, integrations: "")
 
         // Reuses the dashboard shot just written as the attached screenshot, so
         // the guide shows the sheet the way a user meets it.

@@ -515,37 +515,18 @@ final class OpenAICompatibleProvider: AnalysisProvider {
 /// at most one meeting's rows (same accepted edge as the transcription-backend
 /// note in RecordingManager.writeAIUsage).
 final class SwitchingAnalysisProvider: AnalysisProvider {
-    private let claude = ClaudeAnalysisProvider()
-    private let liveCompat = OpenAICompatibleProvider { SwitchingAnalysisProvider.liveKind }
-    private let reportsCompat = OpenAICompatibleProvider { SwitchingAnalysisProvider.reportsKind }
-    private let askCompat = OpenAICompatibleProvider { SwitchingAnalysisProvider.askKind }
-    /// Ollama, for live passes of an on-device-only call whatever the
-    /// Settings choice.
+    private let automatic = AssistantRoutingProvider()
     private let localCompat = OpenAICompatibleProvider { .ollama }
-    private let liveCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.liveKind }
-    private let reportsCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.reportsKind }
-    private let askCLI = CLIAnalysisProvider { SwitchingAnalysisProvider.askKind }
 
-    /// On-device only (CloudGate) routes both roles to Ollama.
     static var liveKind: CopilotProviderKind {
-        CloudGate.forcesLocal ? .ollama : CopilotProviderKind.selected
+        CloudGate.forcesLocal ? .ollama : (AssistantRoutingSettings.configuredKinds().first ?? .ollama)
     }
+    static var reportsKind: CopilotProviderKind { liveKind }
+    static var askKind: CopilotProviderKind { liveKind }
 
-    /// Reports kind; "same as live" resolves to the live kind.
-    static var reportsKind: CopilotProviderKind {
-        CloudGate.forcesLocal ? .ollama : (CopilotProviderKind.reportsSelected ?? liveKind)
-    }
-
-    /// Ask Parrot's kind; "same as reports" resolves to the reports kind.
-    static var askKind: CopilotProviderKind {
-        CloudGate.forcesLocal ? .ollama : (CopilotProviderKind.askSelected ?? reportsKind)
-    }
-
-    /// What the chat header shows: model and where it runs.
     static func askLabel(kind: CopilotProviderKind, model: String) -> String {
         switch kind {
         case .claude:
-            // "claude-haiku-4-5" -> "Claude Haiku"
             let name = model.split(separator: "-").prefix(2).map { $0.capitalized }.joined(separator: " ")
             return "\(name) · cloud"
         case .ollama: return "\(model) · on this Mac"
@@ -554,34 +535,11 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
         }
     }
 
-    private var liveProvider: AnalysisProvider {
-        Self.liveKind == .claude ? claude : (Self.liveKind.isCLI ? (liveCLI as AnalysisProvider) : liveCompat)
-    }
-
-    /// The reports provider, falling back to the live provider when the chosen
-    /// one isn't configured — a report must never be lost to a half-set-up
-    /// secondary backend.
-    private var reportsProvider: AnalysisProvider {
-        let kind = Self.reportsKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (reportsCLI as AnalysisProvider) : reportsCompat)
-        return candidate.isConfigured ? candidate : liveProvider
-    }
-
-    /// Whether live and reports currently share one provider instance (single
-    /// cost bucket in that case).
-    private var rolesShareInstance: Bool {
-        (liveProvider as AnyObject) === (reportsProvider as AnyObject)
-    }
-
-    var isConfigured: Bool { liveProvider.isConfigured }
-
-    // Every call below that goes to a cloud brain passes through the
-    // Redactor when "Hide personal details from cloud AI" is on: details out
-    // as placeholders, real values back in the answer. Ollama gets the text
-    // as is — it never leaves the Mac.
+    var isConfigured: Bool { CloudGate.forcesLocal ? localCompat.isConfigured : automatic.isConfigured }
 
     static func canSendScreenImages(forceLocal: Bool = false) -> Bool {
-        !forceLocal && !CloudGate.forcesLocal && !Redactor.isEnabled && [.claude, .claudeCode, .codex, .copilot].contains(liveKind)
+        !forceLocal && !CloudGate.forcesLocal && !Redactor.isEnabled
+            && AssistantRoutingSettings.configuredKinds().contains(where: AssistantRoutingSettings.supportsImages)
     }
 
     func analyze(_ original: AnalysisRequest) async throws -> AnalysisResult {
@@ -594,147 +552,85 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
             }
             if !Self.canSendScreenImages(forceLocal: request.forceLocal) { screen.jpeg = nil }
             guard screen.jpeg != nil || !screen.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AnalysisError.badResponse("This provider cannot receive screen images and no screen text was available.")
+                throw AnalysisError.badResponse("The enabled integrations cannot receive screen images and no screen text was available.")
             }
             request.screenContext = screen
         }
-        if request.forceLocal || CloudGate.forcesLocal {
-            return try await localCompat.analyze(request)
-        }
-        guard Self.liveKind != .ollama else { return try await liveProvider.analyze(request) }
-        // Cloud from here on. A private meeting's notes never ride along.
-        var outgoing = request
-        if request.previousCallIsPrivate { outgoing.previousCallContext = "" }
-        guard Redactor.isEnabled else { return try await liveProvider.analyze(outgoing) }
+        if request.forceLocal || CloudGate.forcesLocal { return try await localCompat.analyze(request) }
+        if AssistantRoutingSettings.routesLocally() { return try await automatic.analyze(request) }
+        if request.previousCallIsPrivate { request.previousCallContext = "" }
+        guard Redactor.isEnabled else { return try await automatic.analyze(request) }
         var redactor = Redactor()
-        var redacted = redactor.redact(outgoing)
-        if var screen = outgoing.screenContext {
+        var redacted = redactor.redact(request)
+        if var screen = request.screenContext {
             screen.jpeg = nil
             screen.text = redactor.redact(screen.text)
             redacted.screenContext = screen
         }
-        let result = try await liveProvider.analyze(redacted)
-        return redactor.restore(result)
+        return redactor.restore(try await automatic.analyze(redacted))
+    }
+
+    private var reportsProvider: AnalysisProvider { CloudGate.forcesLocal ? localCompat : automatic }
+    private var reportsRedactor: Redactor? {
+        (!reportsRunLocally && Redactor.isEnabled) ? Redactor() : nil
     }
 
     func summarize(transcript: String, insightTitles: [String], bookmarks: [String],
                    instructions: String, counterpart: String, template: ReportTemplate) async throws -> String {
-        var r = reportsRedactor
-        let out = try await reportsProvider.summarize(
-            transcript: r?.redact(transcript) ?? transcript,
-            insightTitles: insightTitles.map { r?.redact($0) ?? $0 },
-            bookmarks: bookmarks.map { r?.redact($0) ?? $0 },
+        var redactor = reportsRedactor
+        let answer = try await reportsProvider.summarize(
+            transcript: redactor?.redact(transcript) ?? transcript,
+            insightTitles: insightTitles.map { redactor?.redact($0) ?? $0 },
+            bookmarks: bookmarks.map { redactor?.redact($0) ?? $0 },
             instructions: instructions, counterpart: counterpart, template: template)
-        return r?.restore(out) ?? out
+        return redactor?.restore(answer) ?? answer
     }
 
     func coachingReport(transcript: String, talkPercentMe: Int, instructions: String,
                         counterpart: String, template: ReportTemplate) async throws -> String {
-        var r = reportsRedactor
-        let out = try await reportsProvider.coachingReport(
-            transcript: r?.redact(transcript) ?? transcript, talkPercentMe: talkPercentMe,
+        var redactor = reportsRedactor
+        let answer = try await reportsProvider.coachingReport(
+            transcript: redactor?.redact(transcript) ?? transcript, talkPercentMe: talkPercentMe,
             instructions: instructions, counterpart: counterpart, template: template)
-        return r?.restore(out) ?? out
+        return redactor?.restore(answer) ?? answer
     }
 
     func complete(system: String, user: String, maxTokens: Int) async throws -> String {
-        var r = reportsRedactor
-        let out = try await reportsProvider.complete(system: system, user: r?.redact(user) ?? user,
-                                                     maxTokens: maxTokens)
-        return r?.restore(out) ?? out
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: .init(task: .general))
     }
 
-    /// A fresh Redactor when report-side calls go to a cloud brain and the
-    /// user asked for redaction; nil otherwise.
-    private var reportsRedactor: Redactor? {
-        (reportsEffectiveKind != .ollama && Redactor.isEnabled) ? Redactor() : nil
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
+        var redactor = reportsRedactor
+        let answer = try await reportsProvider.complete(system: system, user: redactor?.redact(user) ?? user,
+                                                        maxTokens: maxTokens, context: context)
+        return redactor?.restore(answer) ?? answer
     }
 
-    /// The brain that actually answers report-side calls (the reports choice,
-    /// or live when that one isn't set up).
-    private var reportsEffectiveKind: CopilotProviderKind {
-        let kind = Self.reportsKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (reportsCLI as AnalysisProvider) : reportsCompat)
-        return candidate.isConfigured ? kind : Self.liveKind
-    }
-
-    /// Whether the brain answering `complete` runs on this Mac (Ollama) —
-    /// what Ask Parrot tells the user about where excerpts go.
-    var reportsRunLocally: Bool { reportsEffectiveKind == .ollama }
-
-    var reportsConfigured: Bool { reportsProvider.isConfigured }
-
-    // MARK: Ask Parrot
-
-    /// Ask's provider, falling back to the reports one when not set up.
-    private var askProvider: AnalysisProvider {
-        let kind = Self.askKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (askCLI as AnalysisProvider) : askCompat)
-        return candidate.isConfigured ? candidate : reportsProvider
-    }
-
-    private var askEffectiveKind: CopilotProviderKind {
-        let kind = Self.askKind
-        let candidate: AnalysisProvider = kind == .claude ? claude : (kind.isCLI ? (askCLI as AnalysisProvider) : askCompat)
-        return candidate.isConfigured ? kind : reportsEffectiveKind
-    }
-
-    /// Ask Parrot's calls (rewrite and answer), redacted like reports.
+    var reportsRunLocally: Bool { CloudGate.forcesLocal || AssistantRoutingSettings.routesLocally() }
+    var reportsConfigured: Bool { isConfigured }
     func completeAsk(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
-        var r: Redactor? = (askEffectiveKind != .ollama && Redactor.isEnabled) ? Redactor() : nil
-        let out = try await askProvider.complete(system: system, user: r?.redact(user) ?? user,
-                                                 maxTokens: maxTokens, context: context)
-        return r?.restore(out) ?? out
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: context)
     }
-
-    var askRunsLocally: Bool { askEffectiveKind == .ollama }
-    /// Ask's calls go to Ollama (so Ollama must be open with the model).
-    var askUsesOllama: Bool { askEffectiveKind == .ollama }
-    var askConfigured: Bool { askProvider.isConfigured }
+    var askRunsLocally: Bool { reportsRunLocally }
+    var askUsesOllama: Bool { reportsRunLocally }
+    var askConfigured: Bool { isConfigured }
     var askModelLabel: String {
-        let kind = askEffectiveKind
-        let used = (askProvider as? ClaudeAnalysisProvider)?.usageModel
-            ?? (askProvider as? CLIAnalysisProvider)?.usageModel
-            ?? (askProvider as? OpenAICompatibleProvider)?.usageModel
-        return Self.askLabel(kind: kind, model: used ?? CopilotProviderKind.modelName(for: kind))
+        if CloudGate.forcesLocal { return Self.askLabel(kind: .ollama, model: localCompat.usageModel ?? CopilotProviderKind.modelName(for: .ollama)) }
+        return automatic.usageModel.map { "\($0) · automatic routing" } ?? "Automatic · enabled integrations"
     }
-
-    // MARK: Role-split metering for the cost row
-
-    /// Live bucket: model/provider label + tokens. When both roles share one
-    /// instance this is the COMBINED bucket and `reportsUsage` is nil.
     var liveUsage: (model: String, provider: String, totals: AITokenTotals) {
-        (Self.liveKind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((liveProvider as? CLIAnalysisProvider)?.usageModel ?? (liveProvider as? OpenAICompatibleProvider)?.usageModel ?? CopilotProviderKind.modelName(for: Self.liveKind)),
-         Self.liveKind.rawValue,
-         liveProvider.usageTotals)
+        if CloudGate.forcesLocal {
+            return (localCompat.usageModel ?? CopilotProviderKind.modelName(for: .ollama), "ollama", localCompat.usageTotals)
+        }
+        return (automatic.usageModel ?? "Automatic", automatic.usageProvider, automatic.usageTotals)
     }
-
-    /// Reports bucket, nil when reports ran on the live instance.
-    var reportsUsage: (model: String, provider: String, totals: AITokenTotals)? {
-        guard !rolesShareInstance else { return nil }
-        let kind = Self.reportsKind
-        return (kind == .claude ? (claude.usageModel ?? CopilotProviderKind.modelName(for: .claude)) : ((reportsProvider as? CLIAnalysisProvider)?.usageModel ?? (reportsProvider as? OpenAICompatibleProvider)?.usageModel ?? CopilotProviderKind.modelName(for: kind)),
-                kind.rawValue,
-                reportsProvider.usageTotals)
-    }
-
+    var reportsUsage: (model: String, provider: String, totals: AITokenTotals)? { nil }
     var usageTotals: AITokenTotals {
-        [claude.usageTotals, liveCompat.usageTotals, reportsCompat.usageTotals, askCompat.usageTotals, localCompat.usageTotals, liveCLI.usageTotals, reportsCLI.usageTotals, askCLI.usageTotals]
-            .reduce(AITokenTotals()) { acc, u in
-                AITokenTotals(inputTokens: acc.inputTokens + u.inputTokens,
-                              outputTokens: acc.outputTokens + u.outputTokens,
-                              calls: acc.calls + u.calls)
-            }
+        let automaticUsage = automatic.usageTotals
+        let localUsage = localCompat.usageTotals
+        return AITokenTotals(inputTokens: automaticUsage.inputTokens + localUsage.inputTokens,
+                             outputTokens: automaticUsage.outputTokens + localUsage.outputTokens,
+                             calls: automaticUsage.calls + localUsage.calls)
     }
-
-    func resetUsage() {
-        claude.resetUsage()
-        liveCompat.resetUsage()
-        reportsCompat.resetUsage()
-        askCompat.resetUsage()
-        localCompat.resetUsage()
-        liveCLI.resetUsage()
-        reportsCLI.resetUsage()
-        askCLI.resetUsage()
-    }
+    func resetUsage() { automatic.resetUsage(); localCompat.resetUsage() }
 }

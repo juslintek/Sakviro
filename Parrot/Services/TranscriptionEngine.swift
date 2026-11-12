@@ -124,6 +124,10 @@ final class TranscriptionEngine {
     /// them through `speechClock()`, on the same clock as segment timestamps.
     private var appendedSamples: [AudioSource: Int] = [:]
     private var heardSamples: [AudioSource: Int] = [:]
+    @ObservationIgnored private var cachedAdaptiveFloor: [AudioSource: (sampleCount: Int, floor: Float)] = [:]
+    @ObservationIgnored private var lastPreviewSampleCount: [AudioSource: Int] = [:]
+    @ObservationIgnored private var utterancePassedVAD: [AudioSource: Bool] = [.me: false, .them: false]
+    private let previewBase: TimeInterval = 2.5
     private(set) var modelState: ModelState = .notLoaded
     /// Display name of the model currently downloading/preparing, set at the
     /// start of every load — the status views use it to answer "which model
@@ -554,7 +558,15 @@ final class TranscriptionEngine {
         // drops) from steady room tone (stays flat-silence, dots stay off).
         if isTranscribing, frameCount > 0 {
             let energy = samples.reduce(into: Float(0)) { $0 += abs($1) } / Float(frameCount)
-            let floor = bufferLock.withLock { Segmenter.adaptiveFloor(for: audioBuffers[source] ?? []) }
+            let floor: Float = bufferLock.withLock {
+                let buf = audioBuffers[source] ?? []
+                if let cached = cachedAdaptiveFloor[source], abs(buf.count - cached.sampleCount) < 3200 {
+                    return cached.floor
+                }
+                let computed = Segmenter.adaptiveFloor(for: buf)
+                cachedAdaptiveFloor[source] = (buf.count, computed)
+                return computed
+            }
             if energy > floor { lastSpeechAt = Date() }
             bufferLock.withLock {
                 let total = (appendedSamples[source] ?? 0) + frameCount
@@ -565,14 +577,11 @@ final class TranscriptionEngine {
             if hearing != isHearingSpeech {
                 Task { @MainActor in self.isHearingSpeech = hearing }
             }
-        }
 
-        // Language check: gather each side's first voiced audio, then ask
-        // Whisper what it hears. Runs for every backend, since the setting is
-        // shared and a wrong pin ruins all of them; on Parakeet it also
-        // decides which engine transcribes that side.
-        if isTranscribing, frameCount > 0 {
-            let energy = samples.reduce(into: Float(0)) { $0 += abs($1) } / Float(frameCount)
+            // Language check: gather each side's first voiced audio, then ask
+            // Whisper what it hears. Runs for every backend, since the setting is
+            // shared and a wrong pin ruins all of them; on Parakeet it also
+            // decides which engine transcribes that side.
             let full: [Float]? = bufferLock.withLock {
                 probe?.add(samples, voiced: energy > Segmenter.silenceFloor, from: source, at: Date(),
                            holding: router.route(source) == .undecided)
@@ -803,6 +812,9 @@ final class TranscriptionEngine {
             levels = [:]
             appendedSamples = [:]
             heardSamples = [:]
+            cachedAdaptiveFloor = [:]
+            lastPreviewSampleCount = [:]
+            utterancePassedVAD = [.me: false, .them: false]
         }
         deepgramStreamers = [:]
         if backend == .groq {
@@ -888,7 +900,7 @@ final class TranscriptionEngine {
             // diarization sharing the die) backs off automatically instead of
             // starving the commit decodes. Toggleable in Settings; read once
             // per session like the language setting.
-            let previewBase: TimeInterval = 1.0
+            let previewBase = self.previewBase
             let previewEnabled = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true
             var nextPreviewAt: [AudioSource: Date] = [:]
 
@@ -945,11 +957,22 @@ final class TranscriptionEngine {
                             return ([], 0, 0, Segmenter.silenceFloor)
                         }
                         let floor = Segmenter.adaptiveFloor(for: buffered)
+                        self.cachedAdaptiveFloor[source] = (buffered.count, floor)
                         let cut = Segmenter.nextCut(in: buffered, draining: draining, floor: floor)
                         let taken = cut.take.map { Array(buffered[cut.dropLeading ..< cut.dropLeading + $0]) } ?? []
                         let consumed = cut.dropLeading + taken.count
                         guard consumed > 0 else { return ([], 0, 0, floor) }
-                        self.audioBuffers[source] = Array(buffered[consumed...])
+                        let remaining = Array(buffered[consumed...])
+                        self.audioBuffers[source] = remaining
+                        self.cachedAdaptiveFloor[source] = (remaining.count, floor)
+                        if taken.isEmpty {
+                            if remaining.isEmpty {
+                                self.lastPreviewSampleCount[source] = 0
+                                self.utterancePassedVAD[source] = false
+                            } else if let prev = self.lastPreviewSampleCount[source] {
+                                self.lastPreviewSampleCount[source] = max(0, prev - cut.dropLeading)
+                            }
+                        }
                         let start = self.consumedSamples[source] ?? 0
                         self.consumedSamples[source] = start + consumed
                         return (taken, start + cut.dropLeading, self.localClockOffset[source] ?? 0, floor)
@@ -962,26 +985,37 @@ final class TranscriptionEngine {
                         // the user talks. Committed segments still land only at
                         // the cut; the buffer is never consumed here. Local
                         // backend only (cloud chunk users keep the dots).
+                        // Skip rolling preview completely when MLX is active so
+                        // serial subprocess decodes don't queue up behind live speech.
                         // ponytail: a preview of source A delays a pending cut
                         // of source B by one decode; parallelize if dual-speech
                         // latency reports come in.
-                        if previewEnabled, backend == .local, !draining,
+                        if previewEnabled, backend == .local, !draining, !Self.isMLX(self.currentModel),
                            Date() >= nextPreviewAt[source] ?? .distantPast {
-                            let (pending, floor): ([Float], Float) = self.bufferLock.withLock {
+                            let (pending, floor, passedVAD): ([Float], Float, Bool) = self.bufferLock.withLock {
                                 let buffered = self.audioBuffers[source] ?? []
-                                guard buffered.count >= Segmenter.minSpeechSamples else {
-                                    return ([], Segmenter.silenceFloor)
+                                let lastCount = self.lastPreviewSampleCount[source] ?? 0
+                                guard buffered.count >= Segmenter.minSpeechSamples,
+                                      buffered.count - lastCount >= 12_000 else {
+                                    return ([], Segmenter.silenceFloor, false)
                                 }
-                                return (buffered, Segmenter.adaptiveFloor(for: buffered))
+                                let computedFloor = Segmenter.adaptiveFloor(for: buffered)
+                                self.cachedAdaptiveFloor[source] = (buffered.count, computedFloor)
+                                return (buffered, computedFloor, self.utterancePassedVAD[source] ?? false)
                             }
                             let energy = pending.isEmpty ? 0
                                 : pending.reduce(into: Float(0)) { $0 += abs($1) } / Float(pending.count)
                             var voiced = energy > floor
-                            if voiced, let peak = await self.speechPeak(pending),
-                               peak < Self.speechThreshold {
-                                // Room noise: no bubble, and no re-check for a beat.
-                                voiced = false
-                                nextPreviewAt[source] = Date().addingTimeInterval(previewBase)
+                            if voiced, !passedVAD {
+                                if let peak = await self.speechPeak(pending) {
+                                    if peak < Self.speechThreshold {
+                                        // Room noise: no bubble, and no re-check for a beat.
+                                        voiced = false
+                                        nextPreviewAt[source] = Date().addingTimeInterval(previewBase)
+                                    } else {
+                                        self.bufferLock.withLock { self.utterancePassedVAD[source] = true }
+                                    }
+                                }
                             }
                             // No interim callback here on purpose: each preview
                             // re-decodes from the utterance's start, so streaming
@@ -995,19 +1029,18 @@ final class TranscriptionEngine {
                             let decodeStarted = Date()
                             var previewText: String?
                             if voiced {
+                                self.bufferLock.withLock { self.lastPreviewSampleCount[source] = pending.count }
+                                let previewWindow = pending.count > 96_000 ? Array(pending.suffix(96_000)) : pending
                                 switch self.bufferLock.withLock({ self.router.route(source) }) {
                                 case .parakeet(let language):
                                     if let parakeet = self.parakeet {
                                         previewText = (try? await parakeet.transcribe(
-                                            Self.normalizedForDecode(pending), language: language)) ?? ""
+                                            Self.normalizedForDecode(previewWindow), language: language)) ?? ""
                                     }
                                 case .whisper:
-                                    if Self.isMLX(self.currentModel) {
-                                        previewText = try? await MLXTranscriber.perform(action: "transcribe", model: self.currentModel,
-                                            samples: Self.normalizedForDecode(pending), language: language)
-                                    } else if let whisperKit = self.whisperKit {
+                                    if let whisperKit = self.whisperKit {
                                         let result = (try? await whisperKit.transcribe(
-                                            audioArray: Self.normalizedForDecode(pending),
+                                            audioArray: Self.normalizedForDecode(previewWindow),
                                             decodeOptions: decodeOptions)) ?? []
                                         previewText = result.map(\.text).joined(separator: " ")
                                     }
@@ -1042,6 +1075,12 @@ final class TranscriptionEngine {
                         continue
                     }
                     didWork = true
+                    let alreadyPassedVAD: Bool = self.bufferLock.withLock {
+                        let passed = self.utterancePassedVAD[source] ?? false
+                        self.utterancePassedVAD[source] = false
+                        self.lastPreviewSampleCount[source] = 0
+                        return passed
+                    }
 
                     let startTime = Double(startSample) / 16000.0 + clockOffset
                     let endTime = Double(startSample + chunk.count) / 16000.0 + clockOffset
@@ -1063,15 +1102,17 @@ final class TranscriptionEngine {
                     // Scored on the RAW clip: boosted room tone reads as
                     // speech to the detector too (0.8–1.0 vs 0.2–0.4 raw,
                     // 2026-09-24), while real speech scores 1.0 at any gain.
-                    let vadStarted = Date()
-                    if let peak = await self.speechPeak(chunk) {
-                        if Self.loopTrace {
-                            print(String(format: "TRACE %@ [%.2f-%.2f] vad=%.2f (%.0f ms) energy=%.5f%@",
-                                         source.label, startTime, endTime, peak,
-                                         Date().timeIntervalSince(vadStarted) * 1000, energy,
-                                         peak < Self.speechThreshold ? " SKIP" : ""))
+                    if !alreadyPassedVAD {
+                        let vadStarted = Date()
+                        if let peak = await self.speechPeak(chunk) {
+                            if Self.loopTrace {
+                                print(String(format: "TRACE %@ [%.2f-%.2f] vad=%.2f (%.0f ms) energy=%.5f%@",
+                                             source.label, startTime, endTime, peak,
+                                             Date().timeIntervalSince(vadStarted) * 1000, energy,
+                                             peak < Self.speechThreshold ? " SKIP" : ""))
+                            }
+                            guard peak >= Self.speechThreshold else { continue }
                         }
-                        guard peak >= Self.speechThreshold else { continue }
                     }
 
                     // Speakers: the mic re-hears the other side, and what the
@@ -1788,6 +1829,9 @@ final class TranscriptionEngine {
 
         bufferLock.withLock {
             audioBuffers = [.me: [], .them: []]
+            cachedAdaptiveFloor = [:]
+            lastPreviewSampleCount = [:]
+            utterancePassedVAD = [.me: false, .them: false]
         }
 
         currentText = ""

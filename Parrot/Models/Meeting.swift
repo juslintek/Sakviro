@@ -33,7 +33,8 @@ final class Meeting {
     var videoOffset: TimeInterval = 0
     var videoError: String? = nil
     var videoWarning: String? = nil
-    var sessionMode: SessionMode = SessionMode.meeting
+    // Older stores have no value here. A required Codable enum traps when SwiftData saves those rows.
+    var sessionMode: SessionMode? = SessionMode.meeting
     var status: MeetingStatus
     var errorMessage: String?
     /// AI-generated post-call report; set shortly after recording stops.

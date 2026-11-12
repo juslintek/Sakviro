@@ -212,7 +212,7 @@ final class MeetingMemory {
         let embedded = await Task.detached(priority: .utility) { Self.embed(built) }.value
         isIndexing = false
         // Deleted while we embedded: don't bring its text back.
-        guard !removed.contains(id), !meeting.isDeleted else { return }
+        guard !removed.contains(id), !meeting.isDeleted, meeting.modelContext != nil else { return }
         replace(meetingID: id, with: embedded, fingerprint: fp)
     }
 

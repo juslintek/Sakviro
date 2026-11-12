@@ -42,7 +42,7 @@ struct LiveRecordingView: View {
 
             // Audio waveform
             if recordingManager.currentMeeting?.sessionMode != .screenOnly {
-            AudioWaveformView(level: recordingManager.audioCaptureManager.audioLevel)
+            LiveAudioWaveformHost(capture: recordingManager.audioCaptureManager)
                 .frame(height: 40)
                 .padding(.horizontal, Theme.Metrics.pad)
 
@@ -110,8 +110,7 @@ struct LiveRecordingView: View {
             Spacer()
 
             // Timer
-            Text(recordingManager.formattedElapsedTime)
-                .font(Theme.Typography.mono(15, .medium))
+            LiveElapsedTimeText(recordingManager: recordingManager)
 
             Spacer()
 
@@ -301,59 +300,10 @@ struct LiveRecordingView: View {
     private var deviceBar: some View {
         let cap = recordingManager.audioCaptureManager
         return HStack(spacing: 12) {
-            Image(systemName: cap.micActive && !cap.micMuted ? "mic.fill" : "mic.slash.fill")
-                .foregroundStyle(cap.micActive && !cap.micMuted ? Theme.Colors.good : Theme.Colors.warn)
-            Text(cap.inputDeviceName.isEmpty ? "No input" : cap.inputDeviceName)
-                .font(.appCaption)
-                .lineLimit(1)
-            MicLevelView(level: cap.micLevel)
-            if let error = recordingManager.currentMeeting?.videoWarning ?? recordingManager.currentMeeting?.videoError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.appCaption2)
-                    .foregroundStyle(Theme.Colors.warn)
-            }
-            if cap.micMuted {
-                Label("muted — \(MeetingActions.appName) isn't recording you", systemImage: "mic.slash.circle.fill")
-                    .font(.appCaption2)
-                    .foregroundStyle(Theme.Colors.warn)
-            }
-            if !cap.micActive || cap.micSeemsDead {
-                Button {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
-                } label: {
-                    Label("not hearing you — enable mic", systemImage: "exclamationmark.triangle.fill")
-                        .font(.appCaption2)
-                        .foregroundStyle(Theme.Colors.warn)
-                }
-                .buttonStyle(.plain)
-                .help("Open Microphone privacy settings and enable \(MeetingActions.appName)")
-            }
-
-            if cap.micVeryQuiet {
-                Button {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
-                } label: {
-                    Label("mic is very quiet — raise input volume", systemImage: "mic.and.signal.meter")
-                        .font(.appCaption2)
-                        .foregroundStyle(Theme.Colors.warn)
-                }
-                .buttonStyle(.plain)
-                .help("Your voice reaches \(MeetingActions.appName) far below normal speech level — usually a low input volume in System Settings → Sound. Transcription still works, but accuracy improves with more signal.")
-            }
-
-            if cap.micSignalLost {
-                Label("mic muted by another app — reclaiming", systemImage: "mic.slash.circle.fill")
-                    .font(.appCaption2)
-                    .foregroundStyle(Theme.Colors.warn)
-                    .help("macOS is delivering pure silence from the microphone — usually a call app (browser meeting, Zoom) holding it. \(MeetingActions.appName) retries automatically and recovers the moment the mic frees up. Everyone else's audio keeps recording meanwhile.")
-            }
-
-            if cap.echoCancellerStarved {
-                Label("echo cancel inactive", systemImage: "waveform.slash")
-                    .font(.appCaption2)
-                    .foregroundStyle(Theme.Colors.warn)
-                    .help("System audio isn't in the expected format, so speaker bleed may transcribe as \"Me\". Headphones avoid this entirely.")
-            }
+            LiveMicStatusView(
+                capture: cap,
+                videoIssue: recordingManager.currentMeeting?.videoWarning ?? recordingManager.currentMeeting?.videoError
+            )
 
             if recordingManager.transcriptionEngine.micHearsSpeakers {
                 Label("headphones recommended", systemImage: "headphones")
@@ -579,12 +529,18 @@ struct LiveRecordingView: View {
                 // A new segment was committed — refresh the cached sorted list
                 // (the only place the sort runs now). Scrolling is handled by
                 // defaultScrollAnchor(.bottom); no programmatic scroll here.
-                displayedSegments = recordingManager.currentMeeting?.sortedSegments ?? []
+                displayedSegments = Self.updatedSegments(
+                    from: recordingManager.currentMeeting,
+                    existing: displayedSegments
+                )
             }
             .task(id: recordingManager.currentMeeting?.id) {
                 // Seed on appear and reseed if the meeting changes (e.g. navigating
                 // back into a live recording).
-                displayedSegments = recordingManager.currentMeeting?.sortedSegments ?? []
+                displayedSegments = Self.updatedSegments(
+                    from: recordingManager.currentMeeting,
+                    existing: []
+                )
             }
             .onChange(of: copilotJumpTarget) { _, target in
                 guard let target,
@@ -604,6 +560,104 @@ struct LiveRecordingView: View {
                 copilotJumpTarget = nil
             }
         }
+        }
+    }
+
+    private static func updatedSegments(from meeting: Meeting?, existing: [TranscriptSegment]) -> [TranscriptSegment] {
+        guard let segments = meeting?.segments, !segments.isEmpty else { return [] }
+        if segments.count == existing.count + 1,
+           let lastExisting = existing.last {
+            let existingIDs = Set(existing.map(\.id))
+            let added = segments.filter { !existingIDs.contains($0.id) }
+            if added.count == 1, let newSeg = added.first, newSeg.startTime >= lastExisting.startTime {
+                return existing + [newSeg]
+            }
+        }
+        return segments
+            .map { ($0.startTime, $0) }
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+}
+
+/// Isolates the 1 Hz elapsed-time observation to a tiny leaf Text view so ticking
+/// the clock never invalidates `LiveRecordingView.body`.
+private struct LiveElapsedTimeText: View {
+    let recordingManager: RecordingManager
+
+    var body: some View {
+        Text(recordingManager.formattedElapsedTime)
+            .font(Theme.Typography.mono(15, .medium))
+    }
+}
+
+/// Isolates the ~10 Hz audio-level observation to the waveform leaf view.
+private struct LiveAudioWaveformHost: View {
+    let capture: AudioCaptureManager
+
+    var body: some View {
+        AudioWaveformView(level: capture.audioLevel)
+    }
+}
+
+/// Isolates the ~10 Hz mic-level and mic health observations to the device-bar leaf.
+private struct LiveMicStatusView: View {
+    let capture: AudioCaptureManager
+    let videoIssue: String?
+
+    var body: some View {
+        Image(systemName: capture.micActive && !capture.micMuted ? "mic.fill" : "mic.slash.fill")
+            .foregroundStyle(capture.micActive && !capture.micMuted ? Theme.Colors.good : Theme.Colors.warn)
+        Text(capture.inputDeviceName.isEmpty ? "No input" : capture.inputDeviceName)
+            .font(.appCaption)
+            .lineLimit(1)
+        MicLevelView(level: capture.micLevel)
+        if let error = videoIssue {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.appCaption2)
+                .foregroundStyle(Theme.Colors.warn)
+        }
+        if capture.micMuted {
+            Label("muted — \(MeetingActions.appName) isn't recording you", systemImage: "mic.slash.circle.fill")
+                .font(.appCaption2)
+                .foregroundStyle(Theme.Colors.warn)
+        }
+        if !capture.micActive || capture.micSeemsDead {
+            Button {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+            } label: {
+                Label("not hearing you — enable mic", systemImage: "exclamationmark.triangle.fill")
+                    .font(.appCaption2)
+                    .foregroundStyle(Theme.Colors.warn)
+            }
+            .buttonStyle(.plain)
+            .help("Open Microphone privacy settings and enable \(MeetingActions.appName)")
+        }
+
+        if capture.micVeryQuiet {
+            Button {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
+            } label: {
+                Label("mic is very quiet — raise input volume", systemImage: "mic.and.signal.meter")
+                    .font(.appCaption2)
+                    .foregroundStyle(Theme.Colors.warn)
+            }
+            .buttonStyle(.plain)
+            .help("Your voice reaches \(MeetingActions.appName) far below normal speech level — usually a low input volume in System Settings → Sound. Transcription still works, but accuracy improves with more signal.")
+        }
+
+        if capture.micSignalLost {
+            Label("mic muted by another app — reclaiming", systemImage: "mic.slash.circle.fill")
+                .font(.appCaption2)
+                .foregroundStyle(Theme.Colors.warn)
+                .help("macOS is delivering pure silence from the microphone — usually a call app (browser meeting, Zoom) holding it. \(MeetingActions.appName) retries automatically and recovers the moment the mic frees up. Everyone else's audio keeps recording meanwhile.")
+        }
+
+        if capture.echoCancellerStarved {
+            Label("echo cancel inactive", systemImage: "waveform.slash")
+                .font(.appCaption2)
+                .foregroundStyle(Theme.Colors.warn)
+                .help("System audio isn't in the expected format, so speaker bleed may transcribe as \"Me\". Headphones avoid this entirely.")
         }
     }
 }
@@ -725,18 +779,24 @@ struct TypingBubble: View {
 
 /// Three dots pulsing in a staggered wave.
 struct TypingDots: View {
+    @State private var animating = false
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 3) {
-                ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(Theme.Colors.ink3)
-                        .frame(width: 5, height: 5)
-                        .opacity(0.3 + 0.7 * (sin(t * 4.2 - Double(i) * 0.9) + 1) / 2)
-                }
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(Theme.Colors.ink3)
+                    .frame(width: 5, height: 5)
+                    .opacity(animating ? 0.85 : 0.25)
+                    .animation(
+                        .easeInOut(duration: 0.6)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(i) * 0.18),
+                        value: animating
+                    )
             }
         }
+        .onAppear { animating = true }
     }
 }
 
@@ -755,7 +815,6 @@ struct MicLevelView: View {
                     .frame(width: 3, height: 12)
             }
         }
-        .animation(.linear(duration: 0.08), value: level)
     }
 }
 
@@ -775,10 +834,10 @@ struct AudioWaveformView: View {
         }
         .frame(maxWidth: .infinity)
         .onChange(of: level) { _, newValue in
+            guard abs(newValue - (levels.last ?? 0)) > 0.002 || newValue > 0 else { return }
             levels.removeFirst()
             levels.append(newValue)
         }
-        .animation(.linear(duration: 0.1), value: levels)
     }
 }
 

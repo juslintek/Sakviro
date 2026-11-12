@@ -204,6 +204,9 @@ struct MenuBarView: View {
 struct MenuBarLabel: View {
     let recordingManager: RecordingManager
 
+    private static var cachedKey: (time: String?, muted: Bool, scale: CGFloat)?
+    private static var cachedImage: NSImage?
+
     var body: some View {
         let time = recordingManager.isRecording ? recordingManager.formattedElapsedTime : nil
         let muted = recordingManager.isRecording && recordingManager.isMuted
@@ -212,6 +215,11 @@ struct MenuBarLabel: View {
     }
 
     static func render(time: String?, muted: Bool) -> NSImage {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        if let cachedKey, let cachedImage,
+           cachedKey.time == time, cachedKey.muted == muted, cachedKey.scale == scale {
+            return cachedImage
+        }
         let parrot = NSImage(named: "MenuBarIcon").map(Image.init(nsImage:)) ?? Image(systemName: "waveform")
         let content = HStack(spacing: Theme.Metrics.menuBarGap) {
             parrot
@@ -224,9 +232,11 @@ struct MenuBarLabel: View {
         .font(Theme.Typography.menuBarTime)
         .foregroundStyle(.black)   // only the shape counts: the image is a template
         let renderer = ImageRenderer(content: content)
-        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        renderer.scale = scale
         let image = renderer.nsImage ?? NSImage()
         image.isTemplate = true
+        cachedKey = (time, muted, scale)
+        cachedImage = image
         return image
     }
 }

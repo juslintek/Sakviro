@@ -19,15 +19,7 @@ struct ScreenContext: Codable, Sendable {
     static let maxJPEGBytes = 512_000
 
     static func validateJPEG(_ jpeg: Data) -> Bool {
-        guard !jpeg.isEmpty, jpeg.count <= maxJPEGBytes,
-              let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
-              CGImageSourceGetCount(source) == 1,
-              CGImageSourceGetType(source) as String? == "public.jpeg",
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0, width <= 4096, height <= 4096,
-              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { return false }
-        return true
+        !jpeg.isEmpty && jpeg.count <= maxJPEGBytes && jpeg.count >= 4
+            && jpeg[jpeg.startIndex] == 0xFF && jpeg[jpeg.startIndex + 1] == 0xD8
     }
 }

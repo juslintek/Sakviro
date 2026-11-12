@@ -19,6 +19,7 @@ final class RecordingManager {
     /// repeating task and the previous run's label→embedding identities.
     private var liveSweepTask: Task<Void, Never>?
     private var liveAnchors: [String: [Float]] = [:]
+    private var lastSweptThemSegmentCount: Int = 0
     /// Live voiceprint matches (label → remembered name), display-only —
     /// bubbles show "Gürkan?" while the stored label stays Speaker N until
     /// the user confirms post-call.
@@ -82,7 +83,8 @@ final class RecordingManager {
 
     private func screenSignature(forceLocal: Bool) -> String {
         let kind = SwitchingAnalysisProvider.liveKind
-        return "\(kind.rawValue)|\(CopilotProviderKind.modelName(for: kind))|\(forceLocal)|\(CloudGate.forcesLocal)|\(Redactor.isEnabled)|\(UserDefaults.standard.bool(forKey: Redactor.namesKey))"
+        let integrations = UserDefaults.standard.string(forKey: AssistantRoutingSettings.enabledKey) ?? ""
+        return "\(integrations)|\(kind.rawValue)|\(CopilotProviderKind.modelName(for: kind))|\(forceLocal)|\(CloudGate.forcesLocal)|\(Redactor.isEnabled)|\(UserDefaults.standard.bool(forKey: Redactor.namesKey))"
     }
     private func updateScreenPolicy(meeting: Meeting, session: UUID) {
         guard screenSession == session, let sampler = screenSampler else { return }
@@ -134,6 +136,7 @@ final class RecordingManager {
     /// Post-call chains still writing a report. Counted before their task
     /// starts, so the update notice can't slip in between stop and report.
     private var chainsInFlight = 0
+    private let meetingWork = NSCountedSet()
     private var timer: Timer?
     private(set) var modelContext: ModelContext?
 
@@ -249,6 +252,7 @@ final class RecordingManager {
                     meeting.duration = meeting.sortedSegments.last?.endTime ?? 0
                 }
                 let ref = meeting
+                meetingWork.add(meeting.id)
                 Task { await self.finishRecovery(meeting: ref) }
             }
             changed = true
@@ -257,6 +261,8 @@ final class RecordingManager {
     }
 
     private func finishRecovery(meeting: Meeting) async {
+        let id = meeting.id
+        defer { meetingWork.remove(id) }
         // A private call stays private through its salvaged report.
         await CloudGate.$scopeLocal.withValue(meeting.onDeviceOnly) {
             await self.finishRecoveryWork(meeting: meeting)
@@ -667,6 +673,7 @@ final class RecordingManager {
         // "Them" bubbles upgrade to stable Speaker N mid-call. Paced by
         // `liveSweepDelay`; the final post-call pass stays authoritative.
         liveAnchors = [:]
+        lastSweptThemSegmentCount = 0
         liveSpeakerSuggestions = [:]
         if mode == .meeting && UserDefaults.standard.bool(forKey: "liveSpeakerLabels") {
             liveSweepTask = Task { [weak self] in
@@ -793,6 +800,7 @@ final class RecordingManager {
             // Read now: the next call resets it.
             let micHeardSpeakers = transcriptionEngine.micHearsSpeakers
             if !screenOnly { chainsInFlight += 1
+            meetingWork.add(meeting.id)
             Task {
                 // A private meeting's report and after-call actions stay on
                 // this Mac; a call recording meanwhile is unaffected.
@@ -810,7 +818,9 @@ final class RecordingManager {
     }
 
     private func runPostCallChain(_ meetingRef: Meeting, anchors: [String: [Float]], micHeardSpeakers: Bool) async {
+        let id = meetingRef.id
         defer {
+            meetingWork.remove(id)
             chainsInFlight -= 1
             AppUpdater.shared.becameIdle()
         }
@@ -873,6 +883,7 @@ final class RecordingManager {
 
         importProgress = ImportProgress(fileName: name, phase: .transcribing)
         let ref = meeting
+        meetingWork.add(meeting.id)
         Task { await runImport(meeting: ref, audioURL: dest) }
         return meeting
     }
@@ -889,6 +900,8 @@ final class RecordingManager {
     }
 
     private func runImport(meeting: Meeting, audioURL: URL) async {
+        let id = meeting.id
+        defer { meetingWork.remove(id) }
         await CloudGate.$scopeLocal.withValue(meeting.onDeviceOnly) {
             await self.runImportWork(meeting: meeting, audioURL: audioURL)
         }
@@ -996,23 +1009,61 @@ final class RecordingManager {
 
     // MARK: - Deletion
 
+    var deletionFailure: String?
+
     /// Deletes a meeting and its audio files. The only removal path in the app —
     /// without it storage grows forever. Refuses the active recording.
-    func delete(_ meeting: Meeting) {
-        guard !(isRecording && meeting.id == currentMeeting?.id) else { return }
+    @discardableResult
+    func delete(_ meeting: Meeting) -> Bool {
+        deletionFailure = nil
+        guard !meeting.isDeleted, let context = meeting.modelContext else {
+            deletionFailure = "This meeting is no longer available. Reopen the library and try again."
+            return false
+        }
+        let id = meeting.id
+        guard !(isRecording && id == currentMeeting?.id) else {
+            deletionFailure = "Stop recording before deleting this meeting."
+            return false
+        }
+        guard !meetingWork.contains(id) else {
+            deletionFailure = "This meeting is still being processed. Try deleting it when processing finishes."
+            return false
+        }
+        let audioPaths = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty].compactMap { $0 }
+        let videoURLs = [meeting.videoPath, meeting.rawVideoPath].compactMap(VideoCaptureService.ownedURL)
+        do {
+            // Keep pending edits if deletion fails and needs a rollback.
+            try context.save()
+        } catch {
+            deletionFailure = "Couldn't delete the meeting. \(error.localizedDescription)"
+            NSLog("Parrot: deletion save failed, \(error.localizedDescription)")
+            return false
+        }
         // Retention deletes without the UI asking: let it drop the selection
         // first, or the detail view would read a deleted model and crash.
-        NotificationCenter.default.post(name: .parrotMeetingWillDelete, object: meeting.id)
-        for path in [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty].compactMap({ $0 }) {
-            try? FileManager.default.removeItem(atPath: path)
+        NotificationCenter.default.post(name: .parrotMeetingWillDelete, object: id)
+        stopRewrite(meeting)
+        if currentMeeting?.id == id { currentMeeting = nil }
+        if justFinished?.id == id { justFinished = nil }
+        context.delete(meeting)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            deletionFailure = "Couldn't delete the meeting. \(error.localizedDescription)"
+            NSLog("Parrot: deletion failed, \(error.localizedDescription)")
+            return false
         }
-        for path in [meeting.videoPath, meeting.rawVideoPath] {
-            if let url = VideoCaptureService.ownedURL(path) { try? FileManager.default.removeItem(at: url) }
+        memory.remove(meetingID: id)
+        for url in Set(audioPaths.map { URL(fileURLWithPath: $0) } + videoURLs) {
+            do { try FileManager.default.removeItem(at: url) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { continue }
+            catch {
+                deletionFailure = "The meeting was deleted, but a recording file couldn't be removed. \(error.localizedDescription)"
+                NSLog("Parrot: recording cleanup failed, \(error.localizedDescription)")
+            }
         }
-        if currentMeeting?.id == meeting.id { currentMeeting = nil }
-        memory.remove(meetingID: meeting.id)
-        modelContext?.delete(meeting)
-        try? modelContext?.save()
+        return true
     }
 
     // MARK: - Segment Storage
@@ -1085,20 +1136,31 @@ final class RecordingManager {
         let hearsSpeakers = transcriptionEngine.micHearsSpeakers
         if result.source == .me,
            meeting.segments.contains(where: {
-               Self.isBleed(me: incoming, other: ($0.startTime, $0.endTime, $0.text), otherLabel: $0.speakerLabel,
-                            micHearsSpeakers: hearsSpeakers) }) {
+               Self.canOverlapForEcho(startA: result.startTime, endA: result.endTime,
+                                      startB: $0.startTime, endB: $0.endTime)
+                   && Self.isBleed(me: incoming, other: ($0.startTime, $0.endTime, $0.text), otherLabel: $0.speakerLabel,
+                                   micHearsSpeakers: hearsSpeakers) }) {
             return
         }
         // Echo and my own words in one line: cut the echo (see strippingEcho).
         var text = result.text
-        if result.source == .me, hearsSpeakers,
-           let kept = Self.strippingEcho(me: incoming, others: meeting.segments.map {
-               (($0.startTime, $0.endTime, $0.text), $0.speakerLabel) }) {
-            guard !kept.isEmpty else { return }
-            text = kept
+        if result.source == .me, hearsSpeakers {
+            let nearbyOthers: [(line: BleedLine, label: String?)] = meeting.segments.compactMap { seg in
+                guard seg.speakerLabel != AudioSource.me.label,
+                      Self.canOverlapForEcho(startA: result.startTime, endA: result.endTime,
+                                             startB: seg.startTime, endB: seg.endTime) else { return nil }
+                return ((seg.startTime, seg.endTime, seg.text), seg.speakerLabel)
+            }
+            if !nearbyOthers.isEmpty,
+               let kept = Self.strippingEcho(me: incoming, others: nearbyOthers) {
+                guard !kept.isEmpty else { return }
+                text = kept
+            }
         }
         if result.source == .them {
-            for stored in meeting.segments where stored.speakerLabel == AudioSource.me.label {
+            for stored in meeting.segments where stored.speakerLabel == AudioSource.me.label
+                && Self.canOverlapForEcho(startA: stored.startTime, endA: stored.endTime,
+                                          startB: result.startTime, endB: result.endTime) {
                 let me: BleedLine = (stored.startTime, stored.endTime, stored.text)
                 if Self.isBleed(me: me, other: incoming, otherLabel: result.source.label,
                                 micHearsSpeakers: hearsSpeakers) {
@@ -1123,6 +1185,14 @@ final class RecordingManager {
     }
 
     typealias BleedLine = (start: TimeInterval, end: TimeInterval, text: String)
+
+    /// Fast O(1) timestamp pre-filter covering both `isBleed` (starts within 2.5 s
+    /// or sits inside ±0.5 s) and `strippingEcho` (overlaps within ±0.5 s), so
+    /// `addSegment` skips historical segments before faulting/tokenizing their text.
+    private nonisolated static func canOverlapForEcho(startA: TimeInterval, endA: TimeInterval,
+                                                      startB: TimeInterval, endB: TimeInterval) -> Bool {
+        abs(startA - startB) <= 3.0 || (startB <= endA + 1.0 && endB >= startA - 1.0)
+    }
 
     /// A Me line that near-duplicates an other-side line close by is bleed.
     /// The other side is anything but Me: from 45 s in, live sweeps relabel
@@ -1273,6 +1343,9 @@ final class RecordingManager {
         guard callAnalysisEngine.provider.isConfigured else {
             throw CocoaError(.featureUnsupported, userInfo: [NSLocalizedDescriptionKey: "Set up the Assistant's AI in Settings first."])
         }
+        let id = meeting.id
+        meetingWork.add(id)
+        defer { meetingWork.remove(id) }
         // Restart now waits for it, like the report after a call.
         chainsInFlight += 1
         defer {
@@ -1360,7 +1433,8 @@ final class RecordingManager {
         do {
             let answer = try await callAnalysisEngine.provider.complete(
                 system: CallAbout.systemPrompt, user: user, maxTokens: 300)
-            guard let result = CallAbout.parse(answer), !meeting.isDeleted else { return nil }
+            guard !meeting.isDeleted, meeting.modelContext != nil,
+                  let result = CallAbout.parse(answer) else { return nil }
             if !result.about.isEmpty { meeting.about = result.about }
             if !result.title.isEmpty, meeting.hasDefaultTitle { meeting.title = result.title }
             try? modelContext?.save()
@@ -1407,7 +1481,8 @@ final class RecordingManager {
     @discardableResult
     private func polishTranscript(meeting: Meeting, micHeardSpeakers: Bool) async -> Double {
         guard UserDefaults.standard.bool(forKey: "polishAfterCall"), let modelContext else { return 0 }
-        let onDevice = UserDefaults.standard.bool(forKey: TranscriptPolisher.onDeviceKey)
+        let onDevice = UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) != nil
+            || UserDefaults.standard.bool(forKey: TranscriptPolisher.onDeviceKey)
         let timeline: ([Float]) async -> [Float]? = { [transcriptionEngine] in
             await transcriptionEngine.speechTimeline(samples: $0)
         }
@@ -1525,6 +1600,10 @@ final class RecordingManager {
         guard isRecording, elapsedTime >= 45, !diarizationEngine.isProcessing,
               let meeting = currentMeeting,
               let path = meeting.systemAudioPath.nilIfEmpty else { return }
+        let themSegmentCount = meeting.segments.reduce(into: 0) { count, seg in
+            if seg.speakerLabel != "Me" { count += 1 }
+        }
+        guard themSegmentCount > 0, themSegmentCount != lastSweptThemSegmentCount else { return }
         do {
             let url = URL(fileURLWithPath: path)
             // The first sweep reads the whole (still short) call to learn the
@@ -1581,6 +1660,7 @@ final class RecordingManager {
                 }
                 liveSpeakerSuggestions = suggestions
             }
+            lastSweptThemSegmentCount = themSegmentCount
             try? modelContext?.save()
         } catch {
             NSLog("Parrot: live speaker sweep skipped — \(error.localizedDescription)")
@@ -1591,6 +1671,9 @@ final class RecordingManager {
     /// call repeatedly; refuses the meeting currently being recorded. Throws
     /// when detection didn't run, so the labels are unchanged.
     func redetectSpeakers(meeting: Meeting) async throws {
+        let id = meeting.id
+        meetingWork.add(id)
+        defer { meetingWork.remove(id) }
         guard !(isRecording && meeting.id == currentMeeting?.id), await postProcess(meeting: meeting)
         else { throw RecordingError.speakersNotDetected }
     }

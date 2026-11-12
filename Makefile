@@ -86,13 +86,15 @@ howto:
 	@echo
 	@echo 'First launch walks you through two macOS permissions:'
 	@echo '  1. System Audio Recording — the other side of the call (audio-only on macOS 15+;'
-	@echo '     macOS 14 uses Screen Recording for this — audio only, never screen content)'
+	@echo '     macOS 14 uses Screen Recording for audio-only recording)'
+	@echo '     Optional screen context uses your selected window and can send permitted frames'
+	@echo '     to supported enabled account connections when you enable it for the session.'
 	@echo '  2. Microphone             — your side of the call'
 	@echo 'macOS 14 only: Screen Recording takes effect after a restart — quit and reopen if the row stays red.'
 	@echo
 	@echo 'Then pick a WhisperKit model in onboarding (`base` is a good default; it downloads on'
-	@echo 'first use). Everything runs on-device. Cloud engines and the Assistant are opt-in and'
-	@echo 'need your own API keys, set in Settings.'
+	@echo 'first use). Audio, transcription and polish stay on-device. Enable signed-in assistant'
+	@echo 'CLI connections or Ollama in Settings. Available enabled connections are chosen automatically.'
 	@echo
 	@echo 'Run `make help` for other targets.'
 

@@ -29,6 +29,8 @@ final class EchoCanceller {
     /// consumed prefix is reclaimed in bulk by `compactReferenceIfNeeded`.
     private var referenceHead = 0
     private var micAccum: [Int16] = []
+    private var outFrame = [Int16](repeating: 0, count: 160)
+    private var filteredFrame = [Int16](repeating: 0, count: 160)
     private let lock = NSLock()
     private let maxReference = 16000 * 5  // cap the reference ring at 5 s
 
@@ -179,21 +181,26 @@ final class EchoCanceller {
         lock.unlock()
 
         guard !pairs.isEmpty else { return [] }
-        onPairs?(pairs.flatMap(\.0), pairs.flatMap(\.1))
+        if let onPairs {
+            onPairs(pairs.flatMap(\.0), pairs.flatMap(\.1))
+        }
 
         var out: [Float] = []
         out.reserveCapacity(pairs.count * frameSize)
         for (micFrame, refFrame) in pairs {
-            var outFrame = [Int16](repeating: 0, count: frameSize)
             micFrame.withUnsafeBufferPointer { mic in
                 refFrame.withUnsafeBufferPointer { ref in
                     speex_echo_cancellation(echoState, mic.baseAddress, ref.baseAddress, &outFrame)
                 }
             }
-            let filtered = outFrame
+            for i in 0..<frameSize {
+                filteredFrame[i] = outFrame[i]
+            }
             _ = speex_preprocess_run(preprocess, &outFrame)
-            stats.add(mic: micFrame, ref: refFrame, filtered: filtered, out: outFrame)
-            out.append(contentsOf: outFrame.map(Self.toFloat))
+            stats.add(mic: micFrame, ref: refFrame, filtered: filteredFrame, out: outFrame)
+            for s in outFrame {
+                out.append(Self.toFloat(s))
+            }
         }
         return out
     }
@@ -246,7 +253,11 @@ struct EchoStats {
 
     /// Only while they talk: with them silent there's no echo to remove.
     mutating func add(mic: [Int16], ref: [Int16], filtered: [Int16], out: [Int16]) {
-        let meanAbs = ref.reduce(0) { $0 + abs(Float($1)) } / Float(ref.count) / 32767
+        var absSum: Int64 = 0
+        for sample in ref {
+            absSum &+= Int64(abs(Int32(sample)))
+        }
+        let meanAbs = Float(absSum) / Float(ref.count) / 32767
         guard meanAbs > EchoGate.talkingFloor else { return }
         let m = Self.power(mic)
         removed.append(Self.dB(m, Self.power(out)))
@@ -266,7 +277,12 @@ struct EchoStats {
     }
 
     private static func power(_ frame: [Int16]) -> Double {
-        frame.reduce(0) { $0 + Double($1) * Double($1) } / Double(frame.count)
+        var sum: Int64 = 0
+        for sample in frame {
+            let v = Int64(sample)
+            sum &+= v &* v
+        }
+        return Double(sum) / Double(frame.count)
     }
 
     /// One step of Int16 (power 1) as the floor, so silence reads as a big

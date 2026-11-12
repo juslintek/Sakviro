@@ -8,7 +8,7 @@ struct AskPageView: View {
     @Environment(AppSession.self) private var appSession
     @Environment(\.openSettings) private var openSettings
     @Query private var meetings: [Meeting]
-    @AppStorage("askProvider") private var askProvider = ""
+    @AppStorage(AssistantRoutingSettings.enabledKey) private var enabledIntegrations = ""
 
     @State private var selectedID: UUID?
     /// A new chat that has no messages yet (not saved until the first one).
@@ -119,7 +119,7 @@ struct AskPageView: View {
                 Divider()
                 if switching?.askUsesOllama == true, switching?.askConfigured == true {
                     OllamaModelStatusView(model: OpenAICompatibleProvider.ollamaModel, hideWhenReady: true)
-                        .id(askProvider)   // re-check when the AI choice changes
+                        .id(enabledIntegrations)   // re-check when the AI choice changes
                         .padding(.horizontal, Theme.Metrics.pad)
                         // Ready: the view is empty, so no strip either.
                         .padding(.vertical, recordingManager.ollama.status(for: OpenAICompatibleProvider.ollamaModel) == .ready
@@ -201,15 +201,10 @@ struct AskPageView: View {
 
     private var aiMenu: some View {
         Menu {
-            Picker("Ask \(MeetingActions.appName) uses", selection: $askProvider) {
-                Text("Same as reports").tag("")
-                ForEach(CopilotProviderKind.allCases) { Text($0.label).tag($0.rawValue) }
-            }
-            .pickerStyle(.inline)
-            Divider()
+            Text("Automatically uses an enabled connection that supports the request.")
             Button("AI Settings…") { SettingsView.open(.copilot, with: openSettings) }
         } label: {
-            Label(label(for: askProvider), systemImage: "sparkles")
+            Label(label(for: enabledIntegrations), systemImage: "sparkles")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -271,13 +266,12 @@ struct AskPageView: View {
             Text("Get written answers")
                 .font(Theme.Typography.sectionLabel)
                 .foregroundStyle(Theme.Colors.label)
-            Text("Without an AI, \(MeetingActions.appName) shows the closest moments from your meetings. Pick one to get answers:")
+            Text("Without an AI, \(MeetingActions.appName) shows the closest moments from your meetings. Enable a connection to get answers:")
                 .font(Theme.Typography.secondary)
                 .foregroundStyle(Theme.Colors.ink2)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Metrics.controlGap) {
-                Button("Use Claude (needs a key)") { SettingsView.open(.apiKeys, with: openSettings) }
-                Button("Use a free AI on this Mac") { askProvider = CopilotProviderKind.ollama.rawValue }
+                Button("Connect an assistant") { SettingsView.open(.copilot, with: openSettings) }
                     .buttonStyle(.borderedProminent)
             }
         }

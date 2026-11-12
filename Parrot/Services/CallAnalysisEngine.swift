@@ -707,7 +707,8 @@ final class CallAnalysisEngine {
     /// Claude mode with a TypeSafe key and documents, and not in a failure
     /// cool-down. Ollama and custom stay local.
     private var fastPathAvailable: Bool {
-        docMatcher?.isConfigured == true
+        UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) == nil
+            && docMatcher?.isConfigured == true
             && !CloudGate.forcesLocal && !forceLocal
             && CopilotProviderKind.selected == .claude
             && knowledgeBase.map { !$0.isEmpty } == true

@@ -39,6 +39,14 @@ final class CLIAnalysisProvider: AnalysisProvider {
         }
     }
 
+    static func checkExecutable(_ kind: CopilotProviderKind) async throws {
+        let identifier = UUID().uuidString
+        let request: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable(kind),
+                                      "arguments": ["--version"], "input": "", "timeout": 10.0]
+        _ = try await HostHelperClient.shared.perform(JSONSerialization.data(withJSONObject: request), identifier: identifier)
+        try Task.checkCancellation()
+    }
+
     var isConfigured: Bool { !Self.executable(kindSource()).isEmpty }
     var usageTotals: AITokenTotals { lock.lock(); defer { lock.unlock() }; return totals }
     var usageModel: String? {

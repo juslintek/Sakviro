@@ -16,7 +16,7 @@ enum TranscriptionBackend: String, CaseIterable {
 
     static var selected: TranscriptionBackend {
         // On-device only: never a cloud engine, whatever Settings says.
-        guard !CloudGate.forcesLocal else { return .local }
+        guard !CloudGate.forcesLocal, UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) == nil else { return .local }
         return TranscriptionBackend(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .local
     }
 

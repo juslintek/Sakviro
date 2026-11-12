@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="keywords" content="assistant, copilot, setup, claude, api key, ollama, local model, custom server, other ai service, openrouter, openai compatible, reports provider, enable">
+<meta name="keywords" content="assistant, copilot, setup, claude code, codex, gemini, github copilot, ollama, local model, custom cli, automatic routing, enable">
 <title>Setting up the Assistant</title>
 <link rel="canonical" href="https://openparrot.app/help/copilot-setup.html">
 <!-- The guide's home is openparrot.app/help. GitHub Pages sends visitors there; the in-app copy stays put. -->
@@ -22,64 +22,35 @@ report afterwards. It is <strong>off by default</strong> and Parrot works
 perfectly well as a recorder and transcriber without it. When you want it,
 flip it on in Settings → Assistant and pick who does the thinking.</p>
 
-<h2>Three ways to power it</h2>
-<p>The quickest way is the guided setup: Settings → Assistant → Set up
-the Assistant, or the Assistant card on Home. It walks you through Private (Ollama on
-your Mac, installed for you), Balanced (Claude, audio stays on your Mac) or
-Cloud (Claude plus Deepgram), and checks your keys before saving them.</p>
-<ul>
-  <li><strong>Claude (cloud).</strong> The sharpest option. You bring your own
-  API key (Settings → API Keys), transcript text is sent to Anthropic during
-  calls, audio never is. Costs money per call; Parrot shows you exactly how
-  much on each meeting.</li>
-  <li><strong>Ollama (local).</strong> Free and fully private, the AI runs on
-  your Mac. The guided setup installs
-  <a href="https://ollama.com">Ollama</a> for you, or install it yourself and
-  pick a model in Parrot's settings. If the model isn't downloaded yet, Parrot
-  offers to pull it with a progress bar. Honest expectation-setting: local
-  cards arrive noticeably later than cloud ones, because the model shares
-  your Mac with live transcription. Great for reports; on live cards, expect
-  a relaxed rhythm rather than instant. On Apple Silicon get the native
-  build or it will be painfully slow.</li>
-  <li><strong>Other AI service.</strong> Any service that speaks the OpenAI
-  API: OpenRouter, OpenAI, Groq, your own machine or a company gateway. Paste
-  its address, a model name and your key. If you're on a free tier with
-  strict limits, the pace settings in <a href="copilot-live.html">the next
-  topic</a> are made for you.</li>
-</ul>
+<h2>Connect your accounts</h2>
+<p>Open Settings → Assistant → Set up the Assistant, or use the Assistant card
+on Home. Enable one or several connections for Claude / Claude Code,
+ChatGPT / Codex, Gemini, GitHub Copilot, a trusted custom CLI or Ollama.</p>
+<p>For an account connection, follow <strong>Install and sign in</strong> and
+sign in through that CLI. <strong>Check</strong> verifies installation.
+Sign-in and plan limits are confirmed when a request runs. Parrot uses these
+signed-in CLIs for background assistance. Claude Desktop and other desktop
+MCP connectors separately let you ask those apps about saved meetings.</p>
+<p>With Ollama, download and start a local model during setup or in Settings.
+The model shares your Mac with live transcription, so response time depends
+on the model and your Mac.</p>
 
-<h3>Using OpenRouter</h3>
-<p><a href="https://openrouter.ai">OpenRouter</a> gives you one key for many
-models, including cheap fast ones that run well when your Mac is too slow for
-a local model.</p>
-<ol>
-  <li>Make a key at openrouter.ai.</li>
-  <li>In <strong>Settings → Assistant → Model</strong>, pick <strong>Other AI
-  service</strong>. Set <strong>Server URL</strong> to
-  <code>https://openrouter.ai/api/v1</code> and <strong>Model</strong> to a
-  model id from their list, like <code>google/gemini-2.5-flash</code>.</li>
-  <li>Paste the key in <strong>API key</strong>.</li>
-</ol>
-<p>Transcript text goes to OpenRouter and the model you picked, like it does
-for Claude. Parrot can't estimate the cost here, so check your usage on
-OpenRouter.</p>
-
-<h2>Instant answers from your documents</h2>
-<p>On Claude, there is one optional extra: a <strong>TypeSafe AI</strong> key
-(Settings → API Keys). With it, the moment the other side asks something your
-documents cover, Parrot shows the matching excerpt as a "From your docs" card,
-usually within a second, while Claude is still writing its answer. Claude's
-card then takes over. Without the key nothing changes. It sends the question,
-a couple of lines of context and the matching snippets of your documents to
-TypeSafe, never audio, and it only looks at documents whose <strong>Use for</strong>
-includes the call profile you are using.</p>
-
-<h2>Different brains for different jobs</h2>
-<p>Live cards need to be quick and sharp. The post-call report has all the
-time in the world. So Parrot lets you pick a different backend for each: a
-common combo is Claude for the live cards and a local model for reports, which
-keeps reports free and private without slowing the call down. If you only set
-up one, both jobs use it.</p>
+<h2>Automatic routing and model choices</h2>
+<p>Live assistance, reports and Ask share automatic routing. The Assistant
+uses an available enabled connection that supports the request and tries
+another eligible connection if it fails. Each integration has its own
+<strong>Auto</strong> setting and manual model choice in its connection
+settings. Auto keeps your manual choice saved.</p>
+<p>Claude Code, Codex and GitHub Copilot support selected-window images.
+Gemini and custom CLI connections support text only. Images are sent only
+when screen context is allowed. Audio, transcription and transcript polish
+stay on this Mac.</p>
+<p>Enabled account connections receive meeting text, matched document
+snippets and the context allowed by your privacy settings. With
+<strong>On-device only</strong>, account connections stay selected but are
+held, and Ollama can still run locally. See
+<a href="privacy.html">What leaves your Mac</a> and
+<a href="copilot-live.html">The Assistant during a call</a>.</p>
 
 </body>
 </html>

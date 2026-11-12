@@ -7,16 +7,16 @@ struct ReadyStep: View {
     @Environment(RecordingManager.self) private var recordingManager
     @AppStorage("copilotEnabled") private var copilotEnabled = false
     @AppStorage(CopilotPathSettings.enableWhenReadyKey) private var enableWhenReady = false
-    @AppStorage(TranscriptionBackend.defaultsKey) private var backend = TranscriptionBackend.local.rawValue
     @AppStorage("copilotOllamaModel") private var ollamaModel = "llama3.2:3b"
-    @State private var hasClaudeKey = false
+    @AppStorage(AssistantRoutingSettings.enabledKey) private var enabledIntegrations = ""
+    @AppStorage(CloudGate.globalKey) private var onDeviceOnly = false
     @State private var celebrate = false
 
     var body: some View {
         let ollama = recordingManager.ollama
         let status = CopilotStatus.current(
-            copilotEnabled: copilotEnabled, path: model.path, enableWhenReady: enableWhenReady,
-            ollamaPulling: ollama.isPulling, ollamaProgress: ollama.pullProgress, hasClaudeKey: hasClaudeKey)
+            copilotEnabled: copilotEnabled, enabledKinds: enabledIntegrations.split(separator: ",").compactMap { CopilotProviderKind(rawValue: String($0)) }, onDeviceOnly: onDeviceOnly,
+            enableWhenReady: enableWhenReady, ollamaPulling: ollama.isPulling, ollamaProgress: ollama.pullProgress)
         let copy = Self.copy(status, path: model.path, ollamaModel: ollamaModel)
         VStack(spacing: 16) {
             Text("🎉")
@@ -33,16 +33,11 @@ struct ReadyStep: View {
                 }
             }
             if model.mode == .full {
-                if backend == TranscriptionBackend.deepgram.rawValue {
-                    PermissionRow(icon: "waveform", askTitle: "", grantedTitle: "Live text: Deepgram",
-                                  subtitle: "The speech model on this Mac is the backup", isGranted: true, action: {})
-                }
-                SpeechDownloadRow(backup: backend == TranscriptionBackend.deepgram.rawValue)
+                SpeechDownloadRow(backup: false)
             }
         }
         .frame(maxWidth: 480)
         .padding(Theme.Metrics.pad)
-        .task { hasClaudeKey = await APIKeyStore.loadInBackground() != nil }
         .onAppear {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.55).delay(0.05)) { celebrate = true }
         }
@@ -53,23 +48,25 @@ struct ReadyStep: View {
         guard mode == .copilot else { return "Ready to go" }
         switch status {
         case .on, .waitingForModel: return "The Assistant is set up"
-        case .finishOllama, .needsClaudeKey, .off: return "Almost there"
+        case .finishOllama, .needsIntegration, .heldOnDevice, .off: return "Almost there"
         }
     }
 
     static func copy(_ status: CopilotStatus, path: CopilotPath?, ollamaModel: String) -> (title: String, detail: String) {
         switch status {
         case .on where path == .private:
-            ("The Assistant is on, running on this Mac", "\(ollamaModel). Nothing leaves your Mac.")
+            ("The Assistant is on, running on this Mac", "Uses \(ollamaModel) on this Mac.")
         case .on:
-            ("The Assistant is on, using Claude", "Only text is sent.")
+            ("Automatic routing is enabled", "The Assistant will try your enabled connections. Sign-in is checked when a request runs.")
         case .waitingForModel(let progress):
             ("The Assistant turns on when \(ollamaModel) finishes",
              progress.map { "\(Int($0 * 100))% downloaded. Keep going." } ?? "Starting the download.")
         case .finishOllama:
             ("The Assistant is almost there", "Finish the Ollama setup from the card on Home.")
-        case .needsClaudeKey:
-            ("The Assistant needs a working Claude key", "Add it from the card on Home.")
+        case .needsIntegration:
+            ("No assistant connection is enabled", "Add an account connection or Ollama in Settings → Assistant.")
+        case .heldOnDevice:
+            ("Account connections are held", "On-device only is on. Enable Ollama or change Settings → Privacy to use an account connection.")
         case .off:
             ("The Assistant is off for now", "Set it up any time from the card on Home.")
         }

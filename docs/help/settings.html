@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="keywords" content="settings, preferences, polish, polish on this mac, polish with, general, dock, dock icon, hide dock, menu bar only, update, updates, restart now, what's new, changelog, appearance, storage, recording, echo cancellation, playback echo, transcription, model, language, vocabulary, backend, polish, api keys, saved, set up assistant, set up copilot, ollama install, check key">
+<meta name="keywords" content="settings, preferences, polish, polish on this mac, polish with, general, dock, dock icon, hide dock, menu bar only, update, updates, restart now, what's new, changelog, appearance, storage, recording, echo cancellation, playback echo, transcription, model, language, vocabulary, backend, polish, account connections, saved, set up assistant, set up copilot, ollama, automatic routing">
 <title>Settings, page by page</title>
 <link rel="canonical" href="https://openparrot.app/help/settings.html">
 <!-- The guide's home is openparrot.app/help. GitHub Pages sends visitors there; the in-app copy stays put. -->
@@ -73,7 +73,9 @@ Mac</a>.</p>
 <img src="img/settings-transcription.png" alt="The Transcription settings page">
 <p>Everything about how speech becomes text:</p>
 <ul>
-  <li><strong>Model</strong>: which on-device model does the work.
+  <li><strong>Auto</strong> chooses a downloaded model for the next recording
+  or import using the language and call brief. Your manual choice is saved.</li>
+  <li><strong>Manual model</strong> selects the on-device model.
   <strong>Parakeet v3</strong> is the fastest but knows only 25 European
   languages (no Turkish); other languages switch to Whisper on their own
   (see <a href="transcript.html#parakeet">Parakeet and other languages</a>).
@@ -83,21 +85,15 @@ Mac</a>.</p>
   model once.</li>
   <li><strong>Language</strong>: auto-detect by default. If your calls are
   always one language, set it; wrong-language surprises disappear. Parrot
-  warns you during a call if it hears a different one. With Deepgram, pick
-  Turkish, Arabic, Chinese or Korean by name: its auto-detect skips them.</li>
+  warns you during a call if it hears a different one.</li>
   <li><strong>Custom vocabulary</strong>: your names and jargon, comma
   separated, so they stop getting creatively misspelled. See
   <a href="transcript.html">The live transcript</a>.</li>
-  <li><strong>Engine</strong>: on-device is the default and the private
-  choice. Groq and Deepgram are opt-in cloud engines that need your own keys
-  and do send audio out; Parrot falls back to on-device if they fail.</li>
+  <li><strong>Engine</strong> runs on-device. Audio stays on this Mac.</li>
   <li><strong>Polish transcript after each call</strong>: optionally transcribe the saved
   audio again after you hit Stop, all at once, replacing the live transcript with
-  a cleaner one before the report runs. Under <strong>Polish with</strong>, pick
-  <strong>Groq cloud</strong> (a large model, needs a Groq key) or
-  <strong>This Mac</strong> (free, nothing leaves your Mac, takes a few minutes
-  with your on-device model). If a pass loses most of the words, Parrot keeps
-  the live transcript.</li>
+  a cleaner one before the report runs. Polish uses your selected on-device
+  model. If a pass loses most of the words, Parrot keeps the live transcript.</li>
   <li><strong>Speaker Detection</strong>: the small on-device models that
   tell voices apart, <strong>Live speaker labels</strong> (experimental:
   names the other side during the call, not just after) and
@@ -112,22 +108,15 @@ Mac</a>.</p>
 
 <h2>Assistant</h2>
 <img src="img/settings-copilot.png" alt="The Assistant settings page">
-<p>The on switch for the AI layer, the pace and conversation-window controls
-that decide what it costs, and which model powers the live cards and the
-reports (they can be different). <strong>Ask Parrot</strong> picks the AI
-that answers your questions about past calls (same as reports unless you
-change it). See <a href="ask.html">Ask Parrot</a>. New to it?
-<strong>Set up the Assistant</strong> walks you through Private, Balanced or Cloud
-in a couple of minutes. This page has its own guide:
-<a href="copilot-setup.html">Setting up the Assistant</a> for the providers and
-<a href="copilot-live.html">The Assistant during a call</a> for the
-controls.</p>
-
-<h2>API Keys</h2>
-<p>Keys for Claude, Groq, Deepgram and TypeSafe AI, one field each. They're
-stored in the macOS Keychain, not in a file, and never leave the machine
-except to talk to their own service. Paste, done. (For <strong>Other AI service</strong>, the key
-sits on the Assistant page, next to its address.)</p>
+<p>Enable the Assistant during recordings, set its pace and conversation
+window, and connect one or several assistants. Live cards, reports and
+<a href="ask.html">Ask Parrot</a> share automatic routing across enabled
+connections. Each integration keeps its own Auto or manual model choice.</p>
+<p><strong>Set up the Assistant</strong> walks you through account-backed
+CLIs or Ollama on this Mac. Connection settings include installation checks
+and model choices. Sign-in and plan limits are confirmed when a request runs.
+See <a href="copilot-setup.html">Setting up the Assistant</a> for connections
+and <a href="copilot-live.html">The Assistant during a call</a> for controls.</p>
 
 <h2>Knowledge</h2>
 <p>The documents the Assistant may answer from, in folders, each with a

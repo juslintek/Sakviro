@@ -16,6 +16,7 @@ enum ProfileTest {
 
     @MainActor
     static func run() {
+        testMeetingDeletion()
         testKindStyleFallback()
         testHexColor()
         testInsightKey()
@@ -35,6 +36,7 @@ enum ProfileTest {
         testAIUsageCost()
         testSpeechModels()
         testCLIResponses()
+        testAssistantRouting()
         testPermissionFlow()
         testMicWatchdog()
         testCaptureClock()
@@ -84,6 +86,7 @@ enum ProfileTest {
         testMarkdownExport()
         testFolderRename()
         testReportPDF()
+        testMessenger()
         testFollowUpEmail()
         testWebhook()
         testMCPServer()
@@ -1671,16 +1674,16 @@ enum ProfileTest {
     @MainActor
     static func testAskRoute() {
         typealias S = SwitchingAnalysisProvider
-        withDefaults(["copilotProvider": "claude", "reportsProvider": "", "askProvider": "", "onDeviceOnly": false]) {
-            check("ask route: same as reports by default", S.askKind == .claude)
+        withDefaults([AssistantRoutingSettings.enabledKey: "codex", "copilotProvider": "claude", "reportsProvider": "claude", "askProvider": "claude", "onDeviceOnly": false]) {
+            check("ask route: uses enabled account integration for all roles", S.askKind == .codex && S.reportsKind == .codex && S.liveKind == .codex)
         }
-        withDefaults(["copilotProvider": "claude", "reportsProvider": "ollama", "askProvider": "", "onDeviceOnly": false]) {
-            check("ask route: follows the reports choice", S.askKind == .ollama)
+        withDefaults([AssistantRoutingSettings.enabledKey: "ollama", "copilotProvider": "claude", "reportsProvider": "ollama", "askProvider": "claude", "onDeviceOnly": false]) {
+            check("ask route: local resource excludes stale API choices", S.askKind == .ollama && AssistantRoutingSettings.routesLocally())
         }
-        withDefaults(["copilotProvider": "claude", "reportsProvider": "", "askProvider": "ollama", "onDeviceOnly": false]) {
-            check("ask route: its own choice wins", S.askKind == .ollama)
+        withDefaults([AssistantRoutingSettings.enabledKey: "gemini", "copilotProvider": "claude", "reportsProvider": "", "askProvider": "ollama", "onDeviceOnly": false]) {
+            check("ask route: legacy role choice cannot override enabled resources", S.askKind == .gemini)
         }
-        withDefaults(["copilotProvider": "claude", "reportsProvider": "", "askProvider": "claude", "onDeviceOnly": true]) {
+        withDefaults([AssistantRoutingSettings.enabledKey: "codex,gemini", "copilotProvider": "claude", "reportsProvider": "", "askProvider": "claude", "onDeviceOnly": true]) {
             check("ask route: on-device only forces Ollama", S.askKind == .ollama)
         }
         check("ask label: local model", S.askLabel(kind: .ollama, model: "gemma3:4b") == "gemma3:4b · on this Mac")
@@ -2676,7 +2679,7 @@ enum ProfileTest {
     @MainActor
     static func testScreenPolicyCancellation() {
         withDefaults(["copilotEnabled": true, "copilotPace": "fast", "copilotProvider": "codex",
-                      CloudGate.globalKey: false, Redactor.enabledKey: false]) {
+                      AssistantRoutingSettings.enabledKey: "codex", CloudGate.globalKey: false, Redactor.enabledKey: false]) {
             func wait(_ seconds: TimeInterval, until done: () -> Bool) {
                 let deadline = Date.now + seconds
                 while !done() && Date.now < deadline { RunLoop.main.run(until: .now + 0.02) }
@@ -2704,9 +2707,9 @@ enum ProfileTest {
             UserDefaults.standard.set(true, forKey: Redactor.enabledKey)
             check("screen policy: redaction blocks images", !SwitchingAnalysisProvider.canSendScreenImages())
             UserDefaults.standard.set(false, forKey: Redactor.enabledKey)
-            UserDefaults.standard.set("gemini", forKey: "copilotProvider")
+            UserDefaults.standard.set("gemini", forKey: AssistantRoutingSettings.enabledKey)
             check("screen policy: unsupported provider blocks images", !SwitchingAnalysisProvider.canSendScreenImages())
-            UserDefaults.standard.set("copilot", forKey: "copilotProvider")
+            UserDefaults.standard.set("copilot", forKey: AssistantRoutingSettings.enabledKey)
             check("screen policy: supported provider permits images", SwitchingAnalysisProvider.canSendScreenImages())
             check("screen policy: private meeting blocks images", !SwitchingAnalysisProvider.canSendScreenImages(forceLocal: true))
             engine.stop()
@@ -2716,7 +2719,7 @@ enum ProfileTest {
     @MainActor
     static func testMeetingPrivacyObservation() {
         withDefaults(["copilotEnabled": true, "copilotPace": "fast", "copilotProvider": "codex",
-                      CloudGate.globalKey: false, Redactor.enabledKey: false]) {
+                      AssistantRoutingSettings.enabledKey: "codex", CloudGate.globalKey: false, Redactor.enabledKey: false]) {
             func wait(_ seconds: TimeInterval, until done: () -> Bool) {
                 let deadline = Date.now + seconds
                 while !done() && Date.now < deadline { RunLoop.main.run(until: .now + 0.02) }
@@ -2736,6 +2739,7 @@ enum ProfileTest {
             sampler.onContext = { context in samples += 1; engine.ingestScreenContext(context) }
             manager.observeScreenPrivacyForTest(meeting: meeting, sampler: sampler)
             engine.start(profile: ProfilePresets.all().first { $0.name == "Sales discovery" })
+            engine.setPaused(true)
             engine.ingest(text: "What is the price?", at: 10, source: .them)
             var buffer: CVPixelBuffer?
             let status = CVPixelBufferCreate(nil, 128, 128, kCVPixelFormatType_32BGRA, nil, &buffer)
@@ -2749,6 +2753,9 @@ enum ProfileTest {
             memset(CVPixelBufferGetBaseAddress(buffer)!, 64, CVPixelBufferGetDataSize(buffer))
             CVPixelBufferUnlockBaseAddress(buffer, [])
             sampler.submit(buffer)
+            wait(3) { samples == 1 }
+            check("screen observer: sampled frame is ready before dispatch", samples == 1)
+            engine.setPaused(false)
             wait(3) { ai.captured.count == 1 && samples == 1 }
             check("screen observer: real sample reaches provider", ai.captured.first?.screenContext?.jpeg != nil && samples == 1)
             meeting.onDeviceOnly = true
@@ -4886,24 +4893,27 @@ enum ProfileTest {
         let savedGlobal = d.object(forKey: CloudGate.globalKey)
         let savedBackend = d.object(forKey: TranscriptionBackend.defaultsKey)
         let savedProvider = d.object(forKey: "copilotProvider")
+        let savedIntegrations = d.object(forKey: AssistantRoutingSettings.enabledKey)
         defer {
             d.set(savedGlobal, forKey: CloudGate.globalKey)
             d.set(savedBackend, forKey: TranscriptionBackend.defaultsKey)
             d.set(savedProvider, forKey: "copilotProvider")
+            d.set(savedIntegrations, forKey: AssistantRoutingSettings.enabledKey)
         }
+        d.set("codex", forKey: AssistantRoutingSettings.enabledKey)
         d.set(false, forKey: CloudGate.globalKey)
         d.set(TranscriptionBackend.groq.rawValue, forKey: TranscriptionBackend.defaultsKey)
         d.set(CopilotProviderKind.claude.rawValue, forKey: "copilotProvider")
         check("gate: open by default", !CloudGate.forcesLocal)
-        check("gate: cloud engine allowed when open", TranscriptionBackend.selected == .groq)
-        check("gate: Claude allowed when open", SwitchingAnalysisProvider.liveKind == .claude)
+        check("gate: account integrations keep audio on this Mac", TranscriptionBackend.selected == .local)
+        check("gate: enabled account integration allowed when open", SwitchingAnalysisProvider.liveKind == .codex)
         CloudGate.$scopeLocal.withValue(true) {
             check("gate: a private meeting's work is local", CloudGate.forcesLocal)
             check("gate: transcription forced on-device in scope", TranscriptionBackend.selected == .local)
             check("gate: reports forced to Ollama in scope", SwitchingAnalysisProvider.reportsKind == .ollama)
         }
         check("gate: the scope ends with the work (other calls unaffected)",
-              !CloudGate.forcesLocal && SwitchingAnalysisProvider.reportsKind == .claude)
+              !CloudGate.forcesLocal && SwitchingAnalysisProvider.reportsKind == .codex)
         d.set(true, forKey: CloudGate.globalKey)
         check("gate: global switch closes everything",
               CloudGate.forcesLocal && TranscriptionBackend.selected == .local && SwitchingAnalysisProvider.liveKind == .ollama)
@@ -5020,134 +5030,81 @@ enum ProfileTest {
     }
 
     static func testOnboardingFlow() {
-        let full = OnboardingFlow.steps(mode: .full, path: nil)
-        check("onboarding: full tour, no path yet",
-              full == [.welcome, .permissions, .meetCopilot, .copilotPath, .speechModel, .automatic, .aiApps, .ready])
-        let privatePath = OnboardingFlow.steps(mode: .full, path: .private)
-        check("onboarding: private adds setup after speech, and never pitches AI apps",
-              privatePath == [.welcome, .permissions, .meetCopilot, .copilotPath, .speechModel, .copilotSetup, .automatic, .ready])
-        check("onboarding: balanced shows AI apps before ready",
-              OnboardingFlow.steps(mode: .full, path: .balanced) == [.welcome, .permissions, .meetCopilot, .copilotPath, .speechModel, .copilotSetup, .automatic, .aiApps, .ready])
-        check("onboarding: cloud skips the speech step",
-              OnboardingFlow.steps(mode: .full, path: .cloud) == [.welcome, .permissions, .meetCopilot, .copilotPath, .copilotSetup, .automatic, .aiApps, .ready])
-        check("onboarding: switching to private drops a saved AI apps step",
-              OnboardingFlow.resolve(.aiApps, in: privatePath) == .copilotPath)
-        check("onboarding: later has no setup step", OnboardingFlow.steps(mode: .full, path: .later) == full)
-        check("onboarding: short tour",
-              OnboardingFlow.steps(mode: .copilot, path: .balanced) == [.meetCopilot, .copilotPath, .copilotSetup, .ready])
-        check("onboarding: short tour before a pick",
-              OnboardingFlow.steps(mode: .copilot, path: nil) == [.meetCopilot, .copilotPath, .ready])
-
-        check("onboarding: next after the path choice", OnboardingFlow.step(1, from: .copilotPath, in: privatePath) == .speechModel)
-        check("onboarding: back from setup", OnboardingFlow.step(-1, from: .copilotSetup, in: privatePath) == .speechModel)
-        check("onboarding: clamps at the end", OnboardingFlow.step(1, from: .ready, in: privatePath) == .ready)
-        check("onboarding: clamps at the start", OnboardingFlow.step(-1, from: .welcome, in: privatePath) == .welcome)
-        check("onboarding: an orphan step lands on the path choice", OnboardingFlow.resolve(.copilotSetup, in: full) == .copilotPath)
-
+        let full: [OnboardingStep] = [.welcome, .permissions, .meetCopilot, .copilotPath, .speechModel, .automatic, .aiApps, .ready]
+        check("onboarding: account flow always includes local speech", OnboardingFlow.steps(mode: .full, path: .cli) == full)
+        check("onboarding: no connection can continue", OnboardingFlow.steps(mode: .full, path: nil) == full && OnboardingFlow.steps(mode: .full, path: .later) == full)
+        let local = OnboardingFlow.steps(mode: .full, path: .private)
+        check("onboarding: Ollama adds model setup", local == [.welcome, .permissions, .meetCopilot, .copilotPath, .speechModel, .copilotSetup, .automatic, .ready])
+        check("onboarding: mixed integrations also offer Ollama setup", OnboardingFlow.steps(mode: .full, path: .cli, includesOllama: true).contains(.copilotSetup))
+        check("onboarding: legacy API paths now use local speech and account selection", OnboardingFlow.steps(mode: .full, path: .cloud) == full && OnboardingFlow.steps(mode: .full, path: .balanced) == full)
+        check("onboarding: short connection setup", OnboardingFlow.steps(mode: .copilot, path: .cli) == [.meetCopilot, .copilotPath, .ready])
+        check("onboarding: short local setup", OnboardingFlow.steps(mode: .copilot, path: .private) == [.meetCopilot, .copilotPath, .copilotSetup, .ready])
+        check("onboarding: forward and back", OnboardingFlow.step(1, from: .copilotPath, in: local) == .speechModel && OnboardingFlow.step(-1, from: .copilotSetup, in: local) == .speechModel)
+        check("onboarding: clamps at either end", OnboardingFlow.step(1, from: .ready, in: local) == .ready && OnboardingFlow.step(-1, from: .welcome, in: local) == .welcome)
+        check("onboarding: obsolete key setup lands on integrations", OnboardingFlow.resolve(.copilotSetup, in: full) == .copilotPath)
         let suite = "parrot.test.onboardingFlow"
-        let d = UserDefaults(suiteName: suite)!
-        d.removePersistentDomain(forName: suite)
-        d.set(1, forKey: OnboardingFlow.legacyStepKey)
-        OnboardingFlow.migrateLegacyStep(in: d)
-        check("onboarding: legacy 1 → permissions",
-              d.string(forKey: OnboardingFlow.stepKey) == "permissions" && d.object(forKey: OnboardingFlow.legacyStepKey) == nil)
-        d.removePersistentDomain(forName: suite)
-        d.set(2, forKey: OnboardingFlow.legacyStepKey)
-        OnboardingFlow.migrateLegacyStep(in: d)
-        check("onboarding: legacy model step → meet copilot", d.string(forKey: OnboardingFlow.stepKey) == "meetCopilot")
-        d.set("ready", forKey: OnboardingFlow.stepKey)
-        d.set(0, forKey: OnboardingFlow.legacyStepKey)
-        OnboardingFlow.migrateLegacyStep(in: d)
-        check("onboarding: a saved name wins over the legacy index", d.string(forKey: OnboardingFlow.stepKey) == "ready")
-        d.removePersistentDomain(forName: suite)
-
-        check("fit: 8 GB → base + llama", MachineFit.whisperModel(memoryGB: 8) == "base" && MachineFit.ollamaModel(memoryGB: 8) == "llama3.2:3b")
-        check("fit: 16 GB → turbo + gemma", MachineFit.whisperModel(memoryGB: 16) == "large-v3-turbo" && MachineFit.ollamaModel(memoryGB: 16) == "gemma3:4b")
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(1, forKey: OnboardingFlow.legacyStepKey)
+        OnboardingFlow.migrateLegacyStep(in: defaults)
+        check("onboarding: numeric permissions migration", defaults.string(forKey: OnboardingFlow.stepKey) == "permissions" && defaults.object(forKey: OnboardingFlow.legacyStepKey) == nil)
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(2, forKey: OnboardingFlow.legacyStepKey)
+        OnboardingFlow.migrateLegacyStep(in: defaults)
+        check("onboarding: legacy model step resumes tour", defaults.string(forKey: OnboardingFlow.stepKey) == "meetCopilot")
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(4, forKey: OnboardingFlow.legacyStepKey)
+        OnboardingFlow.migrateLegacyStep(in: defaults)
+        check("onboarding: numeric ready preserves completed progress", defaults.string(forKey: OnboardingFlow.stepKey) == "ready")
+        defaults.set("ready", forKey: OnboardingFlow.stepKey)
+        defaults.set(0, forKey: OnboardingFlow.legacyStepKey)
+        OnboardingFlow.migrateLegacyStep(in: defaults)
+        check("onboarding: saved named progress wins", defaults.string(forKey: OnboardingFlow.stepKey) == "ready")
+        check("fit: memory recommendations", MachineFit.whisperModel(memoryGB: 8) == "base" && MachineFit.ollamaModel(memoryGB: 8) == "llama3.2:3b" && MachineFit.whisperModel(memoryGB: 16) == "large-v3-turbo" && MachineFit.ollamaModel(memoryGB: 16) == "gemma3:4b")
         check("fit: bytes round to whole GB", MachineFit.memoryGB(17_179_869_184) == 16)
     }
 
     @MainActor
     static func testCopilotSetupState() {
         let suite = "parrot.test.copilotSetup"
-        let d = UserDefaults(suiteName: suite)!
-        func fresh() { d.removePersistentDomain(forName: suite) }
-        func choices(_ path: CopilotPath, on: Bool = true, claude: Bool = false,
-                     deepgram: Bool = false, ollamaReady: Bool = false) -> CopilotChoices {
-            CopilotChoices(path: path, ollamaModel: "gemma3:4b", copilotSwitchOn: on, claudeKeyWorks: claude,
-                           deepgramKeyWorks: deepgram, ollamaModelReady: ollamaReady)
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("codex,gemini", forKey: AssistantRoutingSettings.enabledKey)
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: false, to: defaults)
+        check("setup: multiple account connections enable automatic assistance", defaults.bool(forKey: "copilotEnabled") && !defaults.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
+        check("setup: audio and polish stay local", defaults.string(forKey: TranscriptionBackend.defaultsKey) == "local" && defaults.bool(forKey: TranscriptPolisher.onDeviceKey))
+        defaults.set(true, forKey: CloudGate.globalKey)
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: false, to: defaults)
+        check("setup: privacy consent is preserved", defaults.bool(forKey: CloudGate.globalKey))
+        defaults.set("ollama", forKey: AssistantRoutingSettings.enabledKey)
+        defaults.set("gemma3:4b", forKey: "copilotOllamaModel")
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: false, to: defaults)
+        check("setup: local-only waits for model", !defaults.bool(forKey: "copilotEnabled") && defaults.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
+        check("setup: different model does not enable assistance", !CopilotPathSettings.ollamaModelReady("other", in: defaults))
+        check("setup: selected model ready enables once", CopilotPathSettings.ollamaModelReady("gemma3:4b", in: defaults) && defaults.bool(forKey: "copilotEnabled") && defaults.bool(forKey: CopilotPathSettings.justTurnedOnKey) && !CopilotPathSettings.ollamaModelReady("gemma3:4b", in: defaults))
+        CopilotPathSettings.apply(enabled: false, ollamaModelReady: false, to: defaults)
+        check("setup: explicit off cancels pending enable", !defaults.bool(forKey: "copilotEnabled") && !defaults.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: true, to: defaults)
+        check("setup: ready local model enables assistance", defaults.bool(forKey: "copilotEnabled"))
+        defaults.set("", forKey: AssistantRoutingSettings.enabledKey)
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: true, to: defaults)
+        check("setup: no connection leaves assistant off", !defaults.bool(forKey: "copilotEnabled"))
+        func status(_ enabled: Bool, _ kinds: [CopilotProviderKind], held: Bool = false, pending: Bool = false, pulling: Bool = false) -> CopilotStatus {
+            CopilotStatus.current(copilotEnabled: enabled, enabledKinds: kinds, onDeviceOnly: held, enableWhenReady: pending, ollamaPulling: pulling, ollamaProgress: pulling ? 0.4 : nil)
         }
-        let backendKey = TranscriptionBackend.defaultsKey
-
-        fresh(); d.set("codex", forKey: "copilotProvider"); d.set(true, forKey: "copilotEnabled")
-        CopilotPathSettings.apply(choices(.cli), to: d)
-        check("setup: configured CLI and Assistant survive onboarding",
-              d.string(forKey: "copilotProvider") == "codex" && d.bool(forKey: "copilotEnabled")
-              && !OnboardingFlow.steps(mode: .full, path: .cli).contains(.copilotSetup))
-        fresh(); CopilotPathSettings.apply(choices(.private), to: d)
-        check("setup: private uses Ollama and local speech",
-              d.string(forKey: "copilotProvider") == "ollama" && d.string(forKey: "copilotOllamaModel") == "gemma3:4b"
-              && d.string(forKey: backendKey) == "local")
-        check("setup: private waits for the model",
-              !d.bool(forKey: "copilotEnabled") && d.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
-        fresh(); CopilotPathSettings.apply(choices(.private, ollamaReady: true), to: d)
-        check("setup: private with the model ready turns on now",
-              d.bool(forKey: "copilotEnabled") && !d.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
-        fresh(); CopilotPathSettings.apply(choices(.private, on: false), to: d)
-        check("setup: switch off means off, nothing pending",
-              !d.bool(forKey: "copilotEnabled") && !d.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
-        fresh(); CopilotPathSettings.apply(choices(.balanced, claude: true), to: d)
-        check("setup: balanced with a working key",
-              d.string(forKey: "copilotProvider") == "claude" && d.bool(forKey: "copilotEnabled")
-              && d.string(forKey: backendKey) == "local")
-        fresh(); CopilotPathSettings.apply(choices(.balanced), to: d)
-        check("setup: balanced without a key stays off", !d.bool(forKey: "copilotEnabled"))
-        fresh(); CopilotPathSettings.apply(choices(.cloud, claude: true, deepgram: true), to: d)
-        check("setup: cloud with Deepgram", d.string(forKey: backendKey) == "deepgram" && d.bool(forKey: "copilotEnabled"))
-        fresh(); CopilotPathSettings.apply(choices(.cloud, claude: true), to: d)
-        check("setup: cloud without Deepgram keeps speech local", d.string(forKey: backendKey) == "local")
-        fresh(); d.set(true, forKey: "copilotEnabled"); CopilotPathSettings.apply(choices(.later), to: d)
-        check("setup: later turns Copilot off and saves the path",
-              !d.bool(forKey: "copilotEnabled") && d.string(forKey: CopilotPath.defaultsKey) == "later")
-        check("setup: reports keep following Copilot", d.string(forKey: "reportsProvider") == nil)
-
-        fresh(); CopilotPathSettings.apply(choices(.private), to: d)
-        check("setup: a different model finishing leaves Copilot waiting",
-              !CopilotPathSettings.ollamaModelReady("llama3.2:3b", in: d) && !d.bool(forKey: "copilotEnabled")
-              && d.bool(forKey: CopilotPathSettings.enableWhenReadyKey))
-        check("setup: model ready switches Copilot on once",
-              CopilotPathSettings.ollamaModelReady("gemma3:4b", in: d) && d.bool(forKey: "copilotEnabled")
-              && d.bool(forKey: CopilotPathSettings.justTurnedOnKey))
-        check("setup: a second ready does nothing", !CopilotPathSettings.ollamaModelReady("gemma3:4b", in: d))
-        fresh(); CopilotPathSettings.apply(choices(.balanced), to: d)
-        d.set(true, forKey: CopilotPathSettings.enableWhenReadyKey)
-        check("setup: model ready ignores other paths", !CopilotPathSettings.ollamaModelReady("gemma3:4b", in: d))
-
-        func status(_ enabled: Bool, _ path: CopilotPath?, pending: Bool = false,
-                    pulling: Bool = false, key: Bool = false) -> CopilotStatus {
-            CopilotStatus.current(copilotEnabled: enabled, path: path, enableWhenReady: pending,
-                                  ollamaPulling: pulling, ollamaProgress: pulling ? 0.4 : nil, hasClaudeKey: key)
-        }
-        check("status: enabled is on", status(true, nil) == .on)
-        check("status: private pulling waits", status(false, .private, pending: true, pulling: true) == .waitingForModel(progress: 0.4))
-        check("status: private not pulling needs Ollama", status(false, .private, pending: true) == .finishOllama)
-        check("status: private switched off is off", status(false, .private) == .off)
-        check("status: balanced without a key", status(false, .balanced) == .needsClaudeKey)
-        check("status: cloud with a key but off", status(false, .cloud, key: true) == .off)
-        check("status: never set up is off", status(false, nil) == .off && status(false, .later) == .off)
-        check("card: on shows only right after turning on",
-              CopilotStatus.showsHomeCard(.on, dismissed: false, justTurnedOn: true)
-              && !CopilotStatus.showsHomeCard(.on, dismissed: false, justTurnedOn: false))
-        check("card: a download can't be hidden",
-              CopilotStatus.showsHomeCard(.waitingForModel(progress: nil), dismissed: true, justTurnedOn: false))
-        check("ready: short tour says set up only when on or on its way",
-              ReadyStep.title(.on, mode: .copilot) == "The Assistant is set up"
-              && ReadyStep.title(.waitingForModel(progress: nil), mode: .copilot) == "The Assistant is set up"
-              && ReadyStep.title(.needsClaudeKey, mode: .copilot) == "Almost there"
-              && ReadyStep.title(.off, mode: .full) == "Ready to go")
-        check("card: dismiss hides the nudge",
-              !CopilotStatus.showsHomeCard(.off, dismissed: true, justTurnedOn: false)
-              && CopilotStatus.showsHomeCard(.needsClaudeKey, dismissed: false, justTurnedOn: false))
-        fresh()
+        check("status: account connection enabled", status(true, [.codex]) == .on)
+        check("status: missing connection is explicit", status(true, []) == .needsIntegration)
+        check("status: privacy hold is explicit", status(true, [.codex], held: true) == .heldOnDevice)
+        check("status: privacy allows local route", status(true, [.codex, .ollama], held: true) == .on)
+        check("status: local download reports progress", status(false, [.ollama], pending: true, pulling: true) == .waitingForModel(progress: 0.4))
+        check("status: local setup remains available", status(false, [.ollama], pending: true) == .finishOllama && status(false, [.ollama]) == .off)
+        check("card: on shows only just after enabling", CopilotStatus.showsHomeCard(.on, dismissed: false, justTurnedOn: true) && !CopilotStatus.showsHomeCard(.on, dismissed: false, justTurnedOn: false))
+        check("card: active download stays visible", CopilotStatus.showsHomeCard(.waitingForModel(progress: nil), dismissed: true, justTurnedOn: false))
+        check("card: dismissal hides inactive setup", !CopilotStatus.showsHomeCard(.needsIntegration, dismissed: true, justTurnedOn: false) && CopilotStatus.showsHomeCard(.needsIntegration, dismissed: false, justTurnedOn: false))
+        check("ready: short flow distinguishes missing or held setup", ReadyStep.title(.on, mode: .copilot) == "The Assistant is set up" && ReadyStep.title(.needsIntegration, mode: .copilot) == "Almost there" && ReadyStep.title(.heldOnDevice, mode: .copilot) == "Almost there")
+        check("ready: full recording setup can finish without assistant", ReadyStep.title(.off, mode: .full) == "Ready to go")
     }
 
     static func testProviderKeyCheck() {
@@ -5227,9 +5184,9 @@ enum ProfileTest {
         // Copilot on even if an earlier check already saw it ready.
         let fresh = OllamaService(defaults: d)
         fresh.record(installed: ["gemma3:4b"], for: "gemma3:4b")
-        CopilotPathSettings.apply(CopilotChoices(path: .private, ollamaModel: "gemma3:4b", copilotSwitchOn: true,
-                                                 claudeKeyWorks: false, deepgramKeyWorks: false,
-                                                 ollamaModelReady: false), to: d)
+        d.set("ollama", forKey: AssistantRoutingSettings.enabledKey)
+        d.set("gemma3:4b", forKey: "copilotOllamaModel")
+        CopilotPathSettings.apply(enabled: true, ollamaModelReady: false, to: d)
         fresh.record(installed: ["gemma3:4b", "llama3.2:3b"], for: "llama3.2:3b")
         check("ollama: another model being ready doesn't turn Copilot on", !d.bool(forKey: "copilotEnabled"))
         fresh.record(installed: ["gemma3:4b"], for: "gemma3:4b")
@@ -5269,47 +5226,45 @@ enum ProfileTest {
     @MainActor
     static func testOnboardingModel() {
         let suite = "parrot.test.onboardingModel"
-        let d = UserDefaults(suiteName: suite)!
-        d.removePersistentDomain(forName: suite)
-        let m = OnboardingModel(defaults: d)
-        check("sheet: fresh starts at welcome", m.step == .welcome && m.mode == .full && m.path == nil && m.isFirst)
-        m.move(1); m.move(1)
-        check("sheet: welcome → permissions → meet copilot", m.step == .meetCopilot)
-        m.move(1)
-        check("sheet: then the path choice", m.step == .copilotPath)
-        m.move(1)
-        check("sheet: continue without a pick stays put",
-              m.step == .copilotPath && m.pathError == "Pick one to continue")
-        m.path = .balanced
-        check("sheet: picking clears the error and saves the path",
-              m.pathError == nil && d.string(forKey: CopilotPath.defaultsKey) == "balanced")
-        m.move(1); m.move(1)
-        check("sheet: balanced goes speech → setup", m.step == .copilotSetup)
-        m.claudeCheck = .works
-        m.move(1)
-        check("sheet: leaving setup writes the settings",
-              m.step == .automatic && d.bool(forKey: "copilotEnabled") && d.string(forKey: "copilotProvider") == "claude")
-        let resumed = OnboardingModel(defaults: d)
-        check("sheet: a relaunch resumes step and path", resumed.step == .automatic && resumed.path == .balanced)
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = OnboardingModel(defaults: defaults)
+        check("sheet: new install starts welcome with no connections", model.step == .welcome && model.mode == .full && model.path == nil && model.isFirst && model.enabledIntegrations.isEmpty)
+        model.move(1); model.move(1); model.move(1)
+        check("sheet: permissions then introduction then integrations", model.step == .copilotPath)
+        model.enabledIntegrations = "codex,gemini"
+        model.move(1)
+        check("sheet: multiple connections lead to local speech", model.step == .speechModel && defaults.string(forKey: AssistantRoutingSettings.enabledKey) == "codex,gemini" && defaults.bool(forKey: "copilotEnabled"))
+        model.move(1)
+        check("sheet: account connections skip key setup", model.step == .automatic)
+        let resumed = OnboardingModel(defaults: defaults)
+        check("sheet: relaunch preserves step and multiple connections", resumed.step == .automatic && resumed.enabledIntegrations == "codex,gemini")
         resumed.go(to: .copilotPath)
         resumed.decideLater()
-        check("sheet: decide later moves on with Copilot off",
-              resumed.step == .speechModel && resumed.path == .later && !d.bool(forKey: "copilotEnabled"))
+        check("sheet: later switches off without erasing connections", resumed.step == .speechModel && !defaults.bool(forKey: "copilotEnabled") && resumed.enabledIntegrations == "codex,gemini")
         resumed.finish()
-        check("sheet: finish clears the step and resets the mode",
-              d.string(forKey: OnboardingFlow.stepKey) == nil && d.string(forKey: OnboardingMode.defaultsKey) == "full")
-        d.set(OnboardingMode.copilot.rawValue, forKey: OnboardingMode.defaultsKey)
-        let short = OnboardingModel(defaults: d)
-        check("sheet: the short tour asks again after decide later", short.path == nil && short.step == .meetCopilot)
-        d.removePersistentDomain(forName: suite)
-        d.set(CopilotPath.cloud.rawValue, forKey: CopilotPath.defaultsKey)
-        d.set(OnboardingStep.copilotSetup.rawValue, forKey: OnboardingFlow.stepKey)
-        d.set(true, forKey: CloudGate.globalKey)
-        let gated = OnboardingModel(defaults: d)
-        check("sheet: on-device only drops a saved cloud path", gated.path == nil && gated.step == .copilotPath)
-        d.set(CopilotPath.private.rawValue, forKey: CopilotPath.defaultsKey)
-        check("sheet: on-device only keeps a saved private path", OnboardingModel(defaults: d).path == .private)
-        d.removePersistentDomain(forName: suite)
+        check("sheet: finish resets temporary progress", defaults.string(forKey: OnboardingFlow.stepKey) == nil && defaults.string(forKey: OnboardingMode.defaultsKey) == "full")
+        defaults.set(true, forKey: "hasCompletedOnboarding")
+        defaults.set(OnboardingStep.ready.rawValue, forKey: OnboardingFlow.stepKey)
+        check("sheet: completed status and ready step survive", OnboardingModel(defaults: defaults).step == .ready && defaults.bool(forKey: "hasCompletedOnboarding"))
+        defaults.set(OnboardingStep.copilotSetup.rawValue, forKey: OnboardingFlow.stepKey)
+        defaults.set(CopilotPath.cloud.rawValue, forKey: CopilotPath.defaultsKey)
+        defaults.set(true, forKey: CloudGate.globalKey)
+        let held = OnboardingModel(defaults: defaults)
+        check("sheet: old key step opens integrations and preserves privacy", held.step == .copilotPath && held.enabledIntegrations == "codex,gemini" && defaults.bool(forKey: CloudGate.globalKey))
+        held.enabledIntegrations = "codex,ollama"
+        check("sheet: mixed setup includes local model download", held.steps.contains(.copilotSetup))
+        defaults.set(OnboardingMode.copilot.rawValue, forKey: OnboardingMode.defaultsKey)
+        defaults.removeObject(forKey: OnboardingFlow.stepKey)
+        check("sheet: short setup retains enabled connections", OnboardingModel(defaults: defaults).step == .meetCopilot && OnboardingModel(defaults: defaults).enabledIntegrations == "codex,ollama")
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(OnboardingStep.copilotSetup.rawValue, forKey: OnboardingFlow.stepKey)
+        defaults.set("claude", forKey: "copilotProvider")
+        let legacyAPI = OnboardingModel(defaults: defaults)
+        check("sheet: legacy API mode requires account selection", legacyAPI.enabledIntegrations.isEmpty && legacyAPI.step == .copilotPath)
+        legacyAPI.move(1)
+        check("sheet: empty connection selection still allows recording", legacyAPI.step == .speechModel && !defaults.bool(forKey: "copilotEnabled"))
     }
 
     // MARK: - Profiles 2.0: report templates

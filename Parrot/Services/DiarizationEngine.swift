@@ -16,6 +16,8 @@ import FluidAudio
 final class DiarizationEngine {
     private(set) var isProcessing = false
     private(set) var progress: Double = 0
+    @ObservationIgnored private var cachedModels: DiarizerModels?
+    @ObservationIgnored private var cachedManager: DiarizerManager?
 
     struct SpeakerSegmentResult {
         let speakerLabel: String
@@ -55,7 +57,10 @@ final class DiarizationEngine {
     func ensureModels() async throws {
         isProcessing = true
         defer { isProcessing = false }
-        _ = try await DiarizerModels.downloadIfNeeded()
+        if cachedModels == nil || !Self.modelsInstalled {
+            cachedModels = try await DiarizerModels.downloadIfNeeded()
+            cachedManager = nil
+        }
     }
 
     /// The last `seconds` of a (possibly still growing) recording as 16 kHz
@@ -106,11 +111,23 @@ final class DiarizationEngine {
             progress = 1.0
         }
 
-        let models = try await DiarizerModels.downloadIfNeeded()
+        let models: DiarizerModels
+        if let existing = cachedModels, Self.modelsInstalled {
+            models = existing
+        } else {
+            let downloaded = try await DiarizerModels.downloadIfNeeded()
+            cachedModels = downloaded
+            cachedManager = nil
+            models = downloaded
+        }
         progress = 0.3
 
         // The chunked pipeline is synchronous and CPU/ANE-heavy (~seconds for
         // a long call) — keep it off the calling actor.
+        // Note: `DiarizerManager.speakerManager` accumulates speaker embeddings
+        // across chunks, so each standalone sweep gets a fresh lightweight
+        // `DiarizerManager` initialized with the in-memory `cachedModels`
+        // (avoiding reloading CoreML models from disk on every 15s sweep).
         let threshold = Self.clusteringThreshold
         let result = try await Task.detached(priority: .userInitiated) {
             var config = DiarizerConfig()

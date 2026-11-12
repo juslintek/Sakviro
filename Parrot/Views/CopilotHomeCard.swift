@@ -7,27 +7,24 @@ import SwiftUI
 struct CopilotHomeCard: View {
     @Environment(RecordingManager.self) private var recordingManager
     @AppStorage("copilotEnabled") private var copilotEnabled = false
-    @AppStorage(CopilotPath.defaultsKey) private var pathRaw = ""
     @AppStorage(CopilotPathSettings.enableWhenReadyKey) private var enableWhenReady = false
     @AppStorage(CopilotPathSettings.cardDismissedKey) private var dismissed = false
     @AppStorage(CopilotPathSettings.justTurnedOnKey) private var justTurnedOn = false
     @AppStorage("copilotOllamaModel") private var ollamaModel = "llama3.2:3b"
-    @State private var hasClaudeKey = false
+    @AppStorage(AssistantRoutingSettings.enabledKey) private var enabledIntegrations = ""
+    @AppStorage(CloudGate.globalKey) private var onDeviceOnly = false
 
     var body: some View {
         let ollama = recordingManager.ollama
         let status = CopilotStatus.current(
-            copilotEnabled: copilotEnabled, path: CopilotPath(rawValue: pathRaw), enableWhenReady: enableWhenReady,
-            ollamaPulling: ollama.isPulling, ollamaProgress: ollama.pullProgress, hasClaudeKey: hasClaudeKey)
+            copilotEnabled: copilotEnabled, enabledKinds: enabledIntegrations.split(separator: ",").compactMap { CopilotProviderKind(rawValue: String($0)) }, onDeviceOnly: onDeviceOnly,
+            enableWhenReady: enableWhenReady, ollamaPulling: ollama.isPulling, ollamaProgress: ollama.pullProgress)
         Group {
             if CopilotStatus.showsHomeCard(status, dismissed: dismissed, justTurnedOn: justTurnedOn) {
                 card(status)
             }
         }
-        .task { hasClaudeKey = await APIKeyStore.loadInBackground() != nil }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { hasClaudeKey = await APIKeyStore.loadInBackground() != nil }
-        }
+
     }
 
     @ViewBuilder
@@ -45,7 +42,7 @@ struct CopilotHomeCard: View {
                 ProgressView(value: progress)
                     .frame(width: 90)
             }
-        case .finishOllama, .needsClaudeKey, .off:
+        case .finishOllama, .needsIntegration, .heldOnDevice, .off:
             nudge(status)
         }
     }
@@ -85,7 +82,8 @@ struct CopilotHomeCard: View {
     private func reason(_ status: CopilotStatus) -> String {
         switch status {
         case .finishOllama: "Finish the Ollama setup to turn it on."
-        case .needsClaudeKey: "It needs a working Claude key."
+        case .needsIntegration: "Enable a signed-in CLI connection or Ollama."
+        case .heldOnDevice: "On-device only is holding your account connections. Enable Ollama or change Settings → Privacy."
         default: "Suggested answers, pinned deal-breakers and a live call score, while you talk."
         }
     }

@@ -28,12 +28,11 @@ dark button, answer the system dialog, and the row flips to a green check on
 its own. Both are needed to record a call properly:</p>
 <ul>
   <li><strong>System Audio Recording.</strong> How Parrot hears the
-  <em>other</em> side of your call. On macOS 15 and newer this is an
-  audio-only permission: Parrot never asks for screen access at all. On
-  macOS 14 the same job runs through the classic Screen Recording
-  permission; that one surprises people, so here's the honest explanation:
-  it is simply how older macOS exposes system audio. Either way Parrot never
-  captures your screen content, only sound.</li>
+  <em>other</em> side of your call. On macOS 15 and newer this permission
+  captures audio only. On macOS 14, audio-only recording uses the classic
+  Screen Recording permission. Optional screen context is a separate choice
+  for the session. When you enable it and select a window, supported enabled
+  account connections can receive permitted frames from that window.</li>
   <li><strong>Microphone.</strong> Your side of the call.</li>
 </ul>
 
@@ -50,20 +49,20 @@ side asks something, it suggests an answer from your own documents, pins
 deal-breakers until you handle them, keeps a live score, and writes a report
 after. Only you see it; no bot joins your call.</p>
 
-<h2>Choose how the Assistant works</h2>
-<img src="img/onboarding-path.png" alt="Private, Balanced and Cloud choices">
-<ul>
-  <li><strong>Private.</strong> Everything stays on your Mac and it's free.
-  Parrot installs the Ollama app for you (about 200 MB; macOS asks you to
-  confirm once) and downloads a model. You can keep going while it
-  downloads; the Assistant turns on by itself when it's done.</li>
-  <li><strong>Balanced.</strong> Recommended. Audio stays on your Mac, only
-  the text goes to Claude. Paste a Claude key and press Check key.</li>
-  <li><strong>Cloud.</strong> Deepgram writes the words live and Claude runs
-  the Assistant. Needs a Claude key; a Deepgram key is optional.</li>
-</ul>
-<p>Not sure yet? Pick <strong>Decide later</strong>. A card on Home lets you
-set the Assistant up any time, and so does Settings → Assistant → Set up the Assistant.</p>
+<h2>Connect your assistants</h2>
+<img src="img/onboarding-path.png" alt="Account connections for Claude Code, Codex, Gemini, GitHub Copilot and local assistants">
+<p>Enable one or several connections. Claude / Claude Code, ChatGPT / Codex,
+Gemini and GitHub Copilot use their signed-in CLIs. Use <strong>Install and
+sign in</strong> for setup instructions, then sign in through the CLI.
+<strong>Check</strong> verifies installation. Sign-in and plan limits are
+confirmed when a request runs.</p>
+<p>The Assistant chooses an available enabled connection for each request and
+tries another if it fails. Each integration keeps its own Auto or manual model
+choice. You can also connect a trusted custom CLI or run Ollama on this Mac.</p>
+<p>Audio and transcription stay on this Mac. Enabled account connections
+receive meeting text and, when supported and allowed, selected-window images.
+You can continue without a connection and add one later in
+Settings → Assistant.</p>
 
 <h2>Speech to text</h2>
 <img src="img/onboarding-model.png" alt="The speech model picker">
@@ -88,11 +87,10 @@ your calls. <strong>Connect Claude</strong> turns on <strong>Allow AI apps
 to read my meetings</strong> and opens Claude's install screen: click Install
 there. <strong>Continue</strong> skips it, and Cursor, Codex and Claude Code
 connect from <strong>Claude &amp; AI Apps</strong> in the sidebar any time.</p>
-<p>This is the one part of Parrot that isn't private like the rest. When you
-ask, what the app reads goes to its company (Anthropic, OpenAI or Cursor's AI
+<p>When you ask, what the app reads goes to its company (Anthropic, OpenAI or Cursor's AI
 provider) under your account. It stays off until you connect, and never sees
-audio, API keys or on-device-only meetings. If you picked
-<strong>Private</strong>, the tour leaves this step out. More in
+audio, API keys or on-device-only meetings. This desktop MCP connection is
+separate from the CLI connections used for background assistance. More in
 <a href="claude.html">Use your meetings in Claude</a>.</p>
 
 <h2>That's all</h2>

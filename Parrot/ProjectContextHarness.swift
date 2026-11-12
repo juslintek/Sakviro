@@ -5,11 +5,32 @@ enum ProjectContextHarness {
     static func run(providerName: String) {
         Task { @MainActor in
             do {
-                let provider: CopilotProviderKind
+                let defaults = UserDefaults.standard
+                let previous = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+                defer { defaults.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
+                let provider: AnalysisProvider
+                var automatic: SwitchingAnalysisProvider?
                 switch providerName {
-                case "codex": provider = .codex
-                case "copilot": provider = .copilot
-                default: throw AnalysisError.badResponse("Use codex or copilot.")
+                case "codex": provider = CLIAnalysisProvider { .codex }
+                case "copilot": provider = CLIAnalysisProvider { .copilot }
+                case "automatic":
+                    let missingExecutable = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("sakviro-missing-cli-\(UUID().uuidString)").path
+                    var settings = previous
+                    settings[AssistantRoutingSettings.enabledKey] = "claudeCode,codex"
+                    settings[CloudGate.globalKey] = false
+                    settings["cli_claudeCode_path"] = missingExecutable
+                    settings["cli_codex_path"] = "@codex"
+                    defaults.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
+                    var missingFailed = false
+                    do { try await CLIAnalysisProvider.checkExecutable(.claudeCode) }
+                    catch { missingFailed = true }
+                    guard missingFailed else { throw AnalysisError.badResponse("Missing first integration unexpectedly passed its executable check.") }
+                    print("project-context: first integration executable check failed as expected")
+                    let switching = SwitchingAnalysisProvider()
+                    automatic = switching
+                    provider = switching
+                default: throw AnalysisError.badResponse("Use codex, copilot or automatic.")
                 }
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -34,7 +55,14 @@ enum ProjectContextHarness {
                     instructions: "Atsakyk lietuviškai, vienu sakiniu, kurį galima pasakyti dabar.", callBrief: brief,
                     allowGeneralKnowledge: false, knownDocumentNames: kb.documentsInPlay(for: nil), persona: profile.persona,
                     counterpart: profile.counterpart, kinds: profile.kinds, gauges: profile.gauges)
-                let result = try await CLIAnalysisProvider({ provider }).analyze(request)
+                let result = try await provider.analyze(request)
+                if let automatic {
+                    let usage = automatic.liveUsage
+                    guard usage.provider == "codex", usage.totals.calls == 1 else {
+                        throw AnalysisError.badResponse("Automatic route did not fall back to Codex.")
+                    }
+                    print("project-context: fallback provider=\(usage.provider) calls=\(usage.totals.calls)")
+                }
                 for insight in result.insights {
                     print("kind=\(insight.kindKey) source=\(insight.source ?? "none") reply=\(insight.reply ?? "none")")
                 }

@@ -129,20 +129,71 @@ enum EchoGate {
         func level(_ x: Float) -> Float { log10(x + 1e-4) }
         let a = mine.prefix(n).map(level)
         var best = Score(follows: -1, lag: 0, themTalking: 0)
+        let minLag = lags.lowerBound
+        let maxValidLag = min(lags.upperBound, start)
+        guard minLag <= maxValidLag else { return best }
+        let minBase = start - maxValidLag
+        let maxEnd = start - minLag + n
+        let spanCount = maxEnd - minBase
+        var theirsLog = [Float](repeating: 0, count: spanCount)
+        var talks = [Bool](repeating: false, count: spanCount)
+        for k in 0..<spanCount {
+            let v = them[minBase + k]
+            theirsLog[k] = level(v)
+            talks[k] = v > talkingFloor
+        }
+        let nf = Float(n)
+        var maAll: Float = 0
+        var aaAll: Float = 0
+        if !whileTheyTalk {
+            maAll = a.reduce(0, +) / nf
+            for x in a {
+                let dx = x - maAll
+                aaAll += dx * dx
+            }
+        }
         for lag in lags where start - lag >= 0 {
-            let theirs = them[(start - lag) ..< (start - lag + n)]
-            let talks = theirs.map { $0 > talkingFloor }
-            let talking = talks.filter { $0 }.count
+            let offset = (start - lag) - minBase
+            var talking = 0
+            for i in 0..<n where talks[offset + i] {
+                talking += 1
+            }
             let r: Float
             if whileTheyTalk {
                 guard talking >= minBleedTalkFrames else { continue }
-                let pairs = zip(a, zip(theirs, talks)).filter { $0.1.1 }
-                r = pearson(pairs.map(\.0), pairs.map { level($0.1.0) })
+                let countF = Float(talking)
+                var sumA: Float = 0, sumB: Float = 0
+                for i in 0..<n where talks[offset + i] {
+                    sumA += a[i]
+                    sumB += theirsLog[offset + i]
+                }
+                let ma = sumA / countF, mb = sumB / countF
+                var ab: Float = 0, aa: Float = 0, bb: Float = 0
+                for i in 0..<n where talks[offset + i] {
+                    let dx = a[i] - ma
+                    let dy = theirsLog[offset + i] - mb
+                    ab += dx * dy
+                    aa += dx * dx
+                    bb += dy * dy
+                }
+                r = (aa > 0 && bb > 0) ? ab / (aa * bb).squareRoot() : 0
             } else {
-                r = pearson(a, theirs.map(level))
+                var sumB: Float = 0
+                for i in 0..<n {
+                    sumB += theirsLog[offset + i]
+                }
+                let mb = sumB / nf
+                var ab: Float = 0, bb: Float = 0
+                for i in 0..<n {
+                    let dx = a[i] - maAll
+                    let dy = theirsLog[offset + i] - mb
+                    ab += dx * dy
+                    bb += dy * dy
+                }
+                r = (aaAll > 0 && bb > 0) ? ab / (aaAll * bb).squareRoot() : 0
             }
             if r > best.follows {
-                best = Score(follows: r, lag: lag, themTalking: Float(talking) / Float(n))
+                best = Score(follows: r, lag: lag, themTalking: Float(talking) / nf)
             }
         }
         return best

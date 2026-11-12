@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="keywords" content="privacy, local, on device, cloud, what is sent, audio, transcript, api keys, keychain, security, set up assistant, set up copilot, ollama install, check key">
+<meta name="keywords" content="privacy, local, on device, cloud, what is sent, audio, transcript, account connections, keychain, security, set up assistant, set up copilot, ollama">
 <title>What leaves your Mac</title>
 <link rel="canonical" href="https://openparrot.app/help/privacy.html">
 <!-- The guide's home is openparrot.app/help. GitHub Pages sends visitors there; the in-app copy stays put. -->
@@ -22,14 +22,12 @@ that is one you make yourself, and here is the complete list.</p>
 <ul>
   <li>Audio recordings. They are written to your disk and never uploaded
   anywhere by anything, ever. No exceptions, no telemetry, no accounts.</li>
-  <li>Transcription, by default: the Whisper model runs on your machine and
-  works with the network cable unplugged.</li>
+  <li>Transcription and transcript polish run with on-device models and work
+  offline after the models are downloaded.</li>
   <li>Meetings, transcripts, insights, reports: a local database in the app's
   own container.</li>
-  <li>Your API keys, if you add any: stored in the macOS Keychain, not in
-  files. When you press <strong>Check key</strong> during setup, the key goes
-  only to its own service (Anthropic or Deepgram), once, to see that it
-  works.</li>
+  <li>Legacy API keys remain stored in the macOS Keychain. Account connections
+  use authentication managed by their signed-in CLI.</li>
   <li>Your documents: read, split up and indexed on your Mac. The files
   themselves are never uploaded.</li>
   <li>Your calendar, if you connect it: read on your Mac through macOS's own
@@ -48,27 +46,21 @@ and after that everything runs offline.</p>
 
 <h2>Sent out only if you set it up</h2>
 <ul>
-  <li><strong>The Assistant on Claude or a custom server:</strong> transcript text
-  from the current call (plus matched knowledge base snippets and your
-  profile's instructions) goes to that provider during calls and for reports.
-  Audio never goes.</li>
-  <li><strong>Instant document answers (TypeSafe AI):</strong> only with a
-  TypeSafe key and only when the Assistant runs on Claude. When the other side
-  asks a question, that question, the last couple of lines of the call, and
-  the matching snippets of your documents go to TypeSafe AI, hosted in the
-  United States, so the matching excerpt can show within a second. Audio
-  never goes. TypeSafe states it does not train on what you send and keeps
-  it only as long as needed to run the service.</li>
+  <li><strong>The Assistant through an account connection.</strong> Meeting
+  text, matched knowledge base snippets and your profile's instructions go to
+  an enabled connection for live assistance, reports and Ask. When screen
+  context is supported and allowed, selected-window images can go too. Audio
+  stays on this Mac. Automatic fallback can use another enabled connection.</li>
   <li><strong>Calendar invites for the Assistant:</strong> only if you turn on
-  "Brief the Assistant from the invite" and the Assistant runs on Claude or a
-  custom server. The matched event's title, guest names and notes (minus
+  "Brief the Assistant from the invite" and the Assistant uses an account
+  connection. The matched event's title, guest names and notes (minus
   dial-in links and numbers) go with the Assistant's requests during that
   call. Off by default.</li>
   <li><strong>Ask Parrot with a cloud AI:</strong> the few best-matching excerpts
-  from your meetings (not whole meetings, never audio) go to the post-call
-  reports AI to write the answer. With Ollama, nothing leaves.</li>
-  <li><strong>Follow-up email:</strong> the meeting's transcript goes to the post-call
-  reports AI to write the draft, only when you ask for one (or turn on "after
+  from your meetings (not whole meetings, never audio) go to the selected enabled
+  connection to write the answer. With Ollama, nothing leaves.</li>
+  <li><strong>Follow-up email:</strong> the meeting's transcript goes to an enabled
+  Assistant connection to write the draft, only when you ask for one (or turn on "after
   every call").</li>
   <li><strong>Webhook:</strong> the finished meeting (summary, next steps, notes, and
   the transcript only if you allow it) goes to the address you pasted.</li>
@@ -80,9 +72,6 @@ and after that everything runs offline.</p>
   notes (on), Assistant cards (off), and call types to hide. It never sees
   on-device-only meetings, audio, keys or settings. Parrot only records counts
   and times of what the app read, never the content.</li>
-  <li><strong>Cloud transcription (Groq or Deepgram):</strong> the call audio
-  is sent to them for speech-to-text as it happens. This is the one opt-in
-  that sends sound. On-device stays the default.</li>
   <li><strong>Update check:</strong> once a day Parrot reads its update feed
   on GitHub Pages. The request carries the app's version and nothing about
   you or your calls. Updates are signed, download in the background and
@@ -94,15 +83,14 @@ and after that everything runs offline.</p>
 <p>Settings &rarr; Privacy has four switches:</p>
 <ul>
   <li><strong>On-device only.</strong> One switch for nothing leaving this Mac. Whisper
-  transcribes, Ollama runs the Assistant and reports, and there's no Groq polish
-  (polish on <strong>This Mac</strong> still runs),
-  no TypeSafe answers and no webhook. You can also turn it on for one profile
+  transcribes, transcript polish stays local, and Ollama can run the Assistant
+  and reports. Account connections are held and webhooks are blocked. You can also turn it on for one profile
   (Settings &rarr; Profiles), so only your therapy or legal calls run this way.
   Meetings recorded like this stay out of Ask Parrot when a cloud AI would write
   the answer, out of the follow-up email on a cloud AI, out of webhooks, and
   out of Claude and other AI apps.</li>
   <li><strong>Hide personal details from cloud AI.</strong> Before anything goes to
-  Claude or a custom server, emails, phone numbers, card numbers and IBANs become
+  an account connection, emails, phone numbers, card numbers and IBANs become
   placeholders like <code>[EMAIL_1]</code>, and the real values are put back in
   what comes back. Names can be hidden too, using Apple's on-device name
   detection.</li>
@@ -122,9 +110,8 @@ and for what.</p>
 local: Parrot only ever talks to it on localhost. Local model, local
 transcription, zero outbound bytes. That combination is the whole reason
 Parrot exists.</p>
-<p>If you pick <strong>Private</strong> during setup, Parrot can install Ollama
-for you: it downloads the official app from ollama.com, checks that it's really
-signed by Ollama, and opens it. macOS asks you to confirm once.</p>
+<p>Enable Ollama in Settings → Assistant or during setup, then download and
+start a local model.</p>
 
 </body>
 </html>
