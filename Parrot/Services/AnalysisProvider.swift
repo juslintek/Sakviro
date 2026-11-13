@@ -81,7 +81,7 @@ enum ModelSelection {
         case .claude: ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
         case .claudeCode: ["haiku", "sonnet", "opus"]
         case .codex: ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
-        case .gemini: ["flash", "pro", "pro"]
+        case .gemini: ["gemini-3.8-flash-low", "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium"]
         case .copilot: ["auto", "gpt-5.4", "gpt-5.4"]
         default: ["", "", ""]
         }

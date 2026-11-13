@@ -56,6 +56,11 @@ struct MenuBarView: View {
                 .disabled(recordingManager.isStopping)
             }
 
+            Button(FloatingAssistantWidgetController.shared.isVisible ? "Hide Floating Assistant" : "Show Floating Assistant") {
+                FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
+            }
+            .keyboardShortcut("w", modifiers: [.option, .command])
+
             Button(recordingManager.isStopping ? "Finalizing…" : "Stop Recording") {
                 Task { await recordingManager.stopRecording() }
             }
@@ -71,6 +76,11 @@ struct MenuBarView: View {
                 .keyboardShortcut("r")
                 .disabled(!recordingManager.transcriptionEngine.isReady)
             profilePicker
+
+            Button(FloatingAssistantWidgetController.shared.isVisible ? "Hide Floating Assistant" : "Show Floating Assistant") {
+                FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
+            }
+            .keyboardShortcut("w", modifiers: [.option, .command])
 
             Divider()
 

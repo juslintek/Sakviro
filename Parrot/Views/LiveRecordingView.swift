@@ -247,6 +247,17 @@ struct LiveRecordingView: View {
                     .transition(.opacity)
             }
             Button {
+                FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
+            } label: {
+                Label("Overlay", systemImage: "macwindow.on.rectangle")
+                    .font(.appHeadline)
+                    .foregroundStyle(FloatingAssistantWidgetController.shared.isVisible ? Theme.Colors.accent : Theme.Colors.ink2)
+            }
+            .buttonStyle(.plain)
+            .help("Show or hide always-on-top Questions, Notes & Lookup widget (⌥⌘W)")
+            .padding(.trailing, Theme.Metrics.controlGap)
+
+            Button {
                 if let mark = recordingManager.markMoment() {
                     markLabel = ""
                     labelingMark = mark

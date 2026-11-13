@@ -58,7 +58,7 @@ final class HostCLIService {
         let executable: String
         if requestedExecutable.hasPrefix("@") {
             let name = String(requestedExecutable.dropFirst())
-            guard ["claude", "codex", "gemini", "copilot"].contains(name),
+            guard ["claude", "codex", "gemini", "copilot", "agy"].contains(name),
                   let found = ["\(home)/.local/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
                 throw failure("CLI executable not found. Set its absolute path in Settings.")
             }

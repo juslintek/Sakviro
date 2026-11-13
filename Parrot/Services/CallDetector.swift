@@ -171,6 +171,9 @@ struct CallDetector {
         "com.apple.accessibility.AccessibilityUIServer",
         "com.apple.VoiceOver",
         "com.apple.dictation",
+        "system-audio-spectrum",
+        "com.openai.chat",
+        "com.openai.ChatGPT",
     ]
 
     /// The apps that count, after the ignore lists. Helper processes are
@@ -201,6 +204,31 @@ struct CallDetector {
         // FaceTime audio runs in the conferencing daemon.
         if id == "com.apple.avconferenced" { return "com.apple.FaceTime" }
         return id
+    }
+
+    static let meetingAppPrefixes: [String] = [
+        "us.zoom",
+        "com.microsoft.teams",
+        "com.apple.FaceTime",
+        "com.tinyspeck.slackmacgap",
+        "com.google.Chrome",
+        "com.apple.Safari",
+        "company.thebrowser",
+        "com.microsoft.edgemac",
+        "org.mozilla.firefox",
+        "com.brave.Browser",
+        "com.hnc.Discord",
+        "Cisco-Systems.Spark",
+        "com.cisco.webexmeetingsapp",
+        "com.skype",
+        "net.whatsapp.WhatsApp",
+        "desktop.WhatsApp",
+        "ru.keepcoder.Telegram",
+        "com.loom.desktop",
+    ]
+
+    static func isKnownMeetingApp(_ appID: String) -> Bool {
+        meetingAppPrefixes.contains { appID == $0 || appID.hasPrefix($0) }
     }
 
     /// A friendly name for prompts ("Zoom", "Chrome").

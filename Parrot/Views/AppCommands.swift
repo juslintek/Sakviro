@@ -249,6 +249,10 @@ struct ParrotCommands: Commands {
             }
             .keyboardShortcut("m", modifiers: [.control, .option, .shift])
             .disabled(!recordingManager.isRecording || recordingManager.isStopping)
+            Button(FloatingAssistantWidgetController.shared.isVisible ? "Hide Floating Assistant" : "Show Floating Assistant") {
+                FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
+            }
+            .keyboardShortcut("w", modifiers: [.option, .command])
         }
 
         // Help: the bundled Apple Help Book (searchable, offline), plus the

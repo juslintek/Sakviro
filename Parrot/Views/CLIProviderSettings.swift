@@ -74,7 +74,7 @@ struct ProviderModelSettings: View {
         case .claude: [ClaudeAnalysisProvider.defaultModel, "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"]
         case .claudeCode: ["sonnet", "opus", "haiku", "fable", "best"]
         case .codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]
-        case .gemini: ["auto", "pro", "flash", "flash-lite"]
+        case .gemini: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-argon-low"]
         case .copilot: ["auto", "gpt-5.4"]
         default: []
         }

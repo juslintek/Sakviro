@@ -33,7 +33,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
         switch kind {
         case .claudeCode: return "@claude"
         case .codex: return "@codex"
-        case .gemini: return "@gemini"
+        case .gemini: return "@agy"
         case .copilot: return "@copilot"
         default: return ""
         }
@@ -133,16 +133,27 @@ final class CLIAnalysisProvider: AnalysisProvider {
                          "--log-level", "none", "--output-format", "json"]
             if !model.isEmpty { arguments += ["--model", model] }
         case .gemini:
-            arguments = ["-p", "Answer the supplied text.", "-o", "json"]
-            if !model.isEmpty { arguments += ["--model", model] }
+            if executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy" {
+                let agyModel: String
+                switch model {
+                case "", "auto", "flash", "flash-lite": agyModel = "gemini-3.8-flash-low"
+                case "pro": agyModel = "gemini-4-hydrogen-medium"
+                default: agyModel = model
+                }
+                arguments = ["-p", "\(system)\n\n\(user)", "--output-format", "json", "--disable-slash-commands", "--model", agyModel]
+            } else {
+                arguments = ["-p", "Answer the supplied text.", "-o", "json"]
+                if !model.isEmpty { arguments += ["--model", model] }
+            }
         default:
             throw AnalysisError.badResponse("Invalid CLI provider.")
         }
         guard !executable.isEmpty else { throw AnalysisError.badResponse("Set the CLI executable path in Settings.") }
         let identifier = UUID().uuidString
+        let isAgy = kind == .gemini && (executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy")
         var payload: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
-                                      "arguments": arguments, "input": "\(system)\n\n\(user)", "timeout": 90.0,
-                                      "preset": kind.rawValue]
+                                      "arguments": arguments, "input": isAgy ? "" : "\(system)\n\n\(user)", "timeout": 90.0,
+                                      "preset": isAgy ? "antigravity" : kind.rawValue]
         if let jpeg {
             guard [.claudeCode, .codex, .copilot].contains(kind), ScreenContext.validateJPEG(jpeg) else {
                 throw AnalysisError.badResponse("This CLI cannot accept the selected screen image.")
