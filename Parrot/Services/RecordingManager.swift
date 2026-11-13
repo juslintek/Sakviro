@@ -1478,6 +1478,47 @@ final class RecordingManager {
         polished * 2 < live
     }
 
+    /// Explicitly re-transcribe an existing meeting's saved audio files using
+    /// the currently selected on-device transcription model and replace its segments.
+    func retranscribe(_ meeting: Meeting) async throws -> Int {
+        guard let modelContext else { throw CocoaError(.fileNoSuchFile) }
+        let systemPath = meeting.systemAudioPath.nilIfEmpty
+        let micPath = meeting.micAudioPath?.nilIfEmpty
+        guard systemPath != nil || micPath != nil else {
+            throw NSError(domain: "Parrot", code: 1, userInfo: [NSLocalizedDescriptionKey: "No saved audio files found for this meeting."])
+        }
+        guard transcriptionEngine.isReady else {
+            throw NSError(domain: "Parrot", code: 2, userInfo: [NSLocalizedDescriptionKey: "Speech model is still loading. Try again in a moment."])
+        }
+        let timeline: ([Float]) async -> [Float]? = { [transcriptionEngine] in
+            await transcriptionEngine.speechTimeline(samples: $0)
+        }
+        let polished = try await TranscriptPolisher.polish(
+            systemPath: systemPath,
+            micPath: micPath,
+            timeline: timeline
+        ) { [transcriptionEngine] _, url in
+            try await transcriptionEngine.transcribeFile(url: url).map { ($0.text, $0.startTime, $0.endTime) }
+        }
+        guard !polished.segments.isEmpty else {
+            throw NSError(domain: "Parrot", code: 3, userInfo: [NSLocalizedDescriptionKey: "Transcription returned no speech segments."])
+        }
+        let lines = polished.micHearsSpeakers ? Self.dedupedEcho(polished.segments) : polished.segments
+        for old in meeting.segments {
+            modelContext.delete(old)
+        }
+        for s in lines {
+            let segment = TranscriptSegment(
+                startTime: s.start, endTime: s.end,
+                text: s.text, speakerLabel: s.speaker, confidence: nil)
+            modelContext.insert(segment)
+            segment.meeting = meeting
+        }
+        try modelContext.save()
+        ExportFolder.refreshIfSaved(meeting)
+        return lines.count
+    }
+
     @discardableResult
     private func polishTranscript(meeting: Meeting, micHeardSpeakers: Bool) async -> Double {
         guard UserDefaults.standard.bool(forKey: "polishAfterCall"), let modelContext else { return 0 }

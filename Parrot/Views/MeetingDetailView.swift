@@ -187,6 +187,18 @@ struct MeetingDetailView: View {
 
                 AskClaudeMenu(meeting: meeting)
 
+                Button {
+                    runAction {
+                        let count = try await recordingManager.retranscribe(meeting)
+                        tab = .transcript
+                        return "Re-transcribed (\(count) segments)."
+                    }
+                } label: {
+                    Label("Re-transcribe", systemImage: "waveform")
+                }
+                .help("Re-run transcription on the saved audio using your current speech model")
+                .disabled(actionRunning || recordingManager.isRecording || (meeting.systemAudioPath.nilIfEmpty == nil && meeting.micAudioPath?.nilIfEmpty == nil))
+
                 Button { showRewrite = true } label: {
                     Label("Rewrite Report…", systemImage: "arrow.triangle.2.circlepath")
                 }
