@@ -133,5 +133,88 @@ extension ProfileTest {
         widget.onRecordingStarted(meeting: meeting, manager: manager)
         check("floating widget: draftNotes prepends when meeting notes exist", meeting.notes == "Prepended draft\n\nExisting notes")
         check("floating widget: draftNotes cleared after second carryover", widget.draftNotes.isEmpty)
+
+        // 6. TranscriptionJobProgress & TranscriptionLogs
+        check(
+            "progress: displayModelName mlx-azuolas lt",
+            TranscriptionJobProgress.displayModelName(modelID: "mlx-azuolas", backend: .local, language: "lt") == "Lithuanian Ąžuolas MLX (mlx-azuolas) · lt"
+        )
+        check(
+            "progress: displayModelName parakeet-v3 nil",
+            TranscriptionJobProgress.displayModelName(modelID: "parakeet-v3", backend: .local, language: nil) == "FluidAudio Parakeet v3"
+        )
+        check(
+            "progress: displayModelName groq whisper lt",
+            TranscriptionJobProgress.displayModelName(modelID: "whisper-large-v3-turbo", backend: .groq, language: "lt") == "Groq Whisper Large v3 Turbo · lt"
+        )
+
+        check("progress: formatTimestamp 134.2", TranscriptionJobProgress.formatTimestamp(134.2) == "02:14.2")
+        check("progress: formatTimestamp 3725.4", TranscriptionJobProgress.formatTimestamp(3725.4) == "1:02:05.4")
+
+        let intervalProg = TranscriptionJobProgress(
+            meetingID: UUID(),
+            fraction: 0.5,
+            stage: .diarizing,
+            startedAt: start,
+            intervalStart: 134.2,
+            intervalEnd: 161.8
+        )
+        check("progress: intervalText formatted", intervalProg.intervalText == "02:14.2 → 02:41.8")
+
+        let intervalProgNil = TranscriptionJobProgress(
+            meetingID: UUID(),
+            fraction: 0.5,
+            stage: .diarizing,
+            startedAt: start,
+            intervalStart: nil,
+            intervalEnd: 161.8
+        )
+        check("progress: intervalText nil when start is nil", intervalProgNil.intervalText == nil)
+
+        let logMid = UUID()
+        let activeJob = TranscriptionJobProgress(
+            meetingID: logMid,
+            fraction: 0.1,
+            stage: .transcribing(trackLabel: "System audio", completedSeconds: 0, totalSeconds: 100),
+            startedAt: start,
+            activeModel: "Initial",
+            pipelineModels: ["Initial"]
+        )
+        manager.transcriptionJobs[logMid] = activeJob
+        manager.appendTranscriptionLog(
+            TranscriptionLogEntry(
+                kind: .intervalSent,
+                modelName: "Lithuanian Ąžuolas MLX (mlx-azuolas) · lt",
+                trackLabel: "System audio",
+                intervalStart: 12.5,
+                intervalEnd: 34.0,
+                sampleCount: 344_000,
+                summary: "Sending"
+            ),
+            for: logMid
+        )
+        check(
+            "manager: appendTranscriptionLog updates activeModel",
+            manager.transcriptionJobs[logMid]?.activeModel == "Lithuanian Ąžuolas MLX (mlx-azuolas) · lt"
+        )
+        check(
+            "manager: appendTranscriptionLog updates intervalText",
+            manager.transcriptionJobs[logMid]?.intervalText == "00:12.5 → 00:34.0"
+        )
+
+        for i in 0..<505 {
+            manager.appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: "Lithuanian Ąžuolas MLX (mlx-azuolas) · lt",
+                    summary: "Entry \(i)"
+                ),
+                for: logMid
+            )
+        }
+        check("manager: transcriptionLogs ring capped at 500", manager.transcriptionLogs[logMid]?.count == 500)
+
+        manager.clearTranscriptionLog(for: logMid)
+        check("manager: clearTranscriptionLog clears entries", manager.transcriptionLogs[logMid] == nil)
     }
 }

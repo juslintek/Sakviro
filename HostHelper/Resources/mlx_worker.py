@@ -5,6 +5,7 @@ import math
 import os
 import struct
 import sys
+import time
 
 try:
     import numpy as np
@@ -70,19 +71,44 @@ def handle(request):
         if np is None:
             import numpy as _np
             audio = _np.asarray(audio, dtype=_np.float32)
-        result = transcribe(audio, path_or_hf_repo=path,
-                            language=language, verbose=None, fp16=True)
+        t0 = time.monotonic()
+        result = transcribe(
+            audio,
+            path_or_hf_repo=path,
+            language=language,
+            verbose=None,
+            fp16=True,
+            condition_on_previous_text=False,
+            temperature=(0.0, 0.2),
+            compression_ratio_threshold=2.4,
+            no_speech_threshold=0.6,
+        )
+        elapsed_ms = int(round((time.monotonic() - t0) * 1000))
     raw_segments = result.get("segments") or []
-    segments = [
-        {
-            "start": float(s.get("start", 0.0)),
-            "end": float(s.get("end", 0.0)),
-            "text": str(s.get("text", "")).strip(),
+    segments = []
+    for s in raw_segments:
+        txt = str(s.get("text", "")).strip()
+        if not txt:
+            continue
+        item = {
+            "start": round(float(s.get("start", 0.0)), 3),
+            "end": round(float(s.get("end", 0.0)), 3),
+            "text": txt,
         }
-        for s in raw_segments
-        if str(s.get("text", "")).strip()
-    ]
-    return {"ok": True, "text": result["text"], "segments": segments}
+        lp = s.get("avg_logprob")
+        if isinstance(lp, (int, float)) and math.isfinite(lp):
+            item["avg_logprob"] = round(float(lp), 4)
+        nsp = s.get("no_speech_prob")
+        if isinstance(nsp, (int, float)) and math.isfinite(nsp):
+            item["no_speech_prob"] = round(float(nsp), 4)
+        segments.append(item)
+    return {
+        "ok": True,
+        "text": result.get("text", ""),
+        "language": result.get("language") or language,
+        "elapsedMs": elapsed_ms,
+        "segments": segments,
+    }
 
 
 for line in sys.stdin:

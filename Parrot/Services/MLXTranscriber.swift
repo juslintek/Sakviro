@@ -5,6 +5,16 @@ enum MLXTranscriber {
         let start: Double
         let end: Double
         let text: String
+        let avg_logprob: Double?
+        let no_speech_prob: Double?
+
+        init(start: Double, end: Double, text: String, avg_logprob: Double? = nil, no_speech_prob: Double? = nil) {
+            self.start = start
+            self.end = end
+            self.text = text
+            self.avg_logprob = avg_logprob
+            self.no_speech_prob = no_speech_prob
+        }
     }
 
     struct Reply: Decodable, Sendable {
@@ -12,6 +22,16 @@ enum MLXTranscriber {
         let text: String?
         let segments: [Segment]?
         let error: String?
+        let language: String?
+        let elapsedMs: Int?
+    }
+
+    struct DetailedReply: Sendable {
+        let rawText: String
+        let segments: [Segment]
+        let language: String?
+        let elapsedMs: Int
+        let rawResponseJSON: String
     }
 
     static let models: [(id: String, name: String)] = [
@@ -61,23 +81,46 @@ enum MLXTranscriber {
     }
 
     static func performSegments(samples: [Float], model: String, directory: URL? = nil, python: URL? = nil, language: String? = nil) async throws -> [Segment] {
-        let reply = try await execute(action: "transcribe", model: model, samples: samples, directory: directory, python: python, language: language)
+        let detailed = try await performDetailed(samples: samples, model: model, directory: directory, python: python, language: language)
+        return detailed.segments
+    }
+
+    static func performDetailed(samples: [Float], model: String, directory: URL? = nil, python: URL? = nil, language: String? = nil) async throws -> DetailedReply {
+        let t0 = Date()
+        let (reply, rawData) = try await executeWithRaw(action: "transcribe", model: model, samples: samples, directory: directory, python: python, language: language)
         let trimmedText = (reply.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let nonEmpties = (reply.segments ?? []).compactMap { seg -> Segment? in
             let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
-            return Segment(start: seg.start, end: seg.end, text: trimmed)
+            return Segment(start: seg.start, end: seg.end, text: trimmed, avg_logprob: seg.avg_logprob, no_speech_prob: seg.no_speech_prob)
         }
+        let segments: [Segment]
         if nonEmpties.isEmpty {
             if !trimmedText.isEmpty {
-                return [Segment(start: 0, end: Double(samples.count) / 16000.0, text: trimmedText)]
+                segments = [Segment(start: 0, end: Double(samples.count) / 16000.0, text: trimmedText)]
+            } else {
+                segments = []
             }
-            return []
+        } else {
+            segments = nonEmpties
         }
-        return nonEmpties
+        let elapsedMs = reply.elapsedMs ?? max(1, Int(Date().timeIntervalSince(t0) * 1000))
+        let rawResponseJSON = String(data: rawData, encoding: .utf8) ?? "{}"
+        return DetailedReply(
+            rawText: trimmedText,
+            segments: segments,
+            language: reply.language,
+            elapsedMs: elapsedMs,
+            rawResponseJSON: rawResponseJSON
+        )
     }
 
     private static func execute(action: String, model: String, samples: [Float]? = nil, directory: URL? = nil, python: URL? = nil, language: String? = nil) async throws -> Reply {
+        let (reply, _) = try await executeWithRaw(action: action, model: model, samples: samples, directory: directory, python: python, language: language)
+        return reply
+    }
+
+    private static func executeWithRaw(action: String, model: String, samples: [Float]? = nil, directory: URL? = nil, python: URL? = nil, language: String? = nil) async throws -> (Reply, Data) {
         let id = UUID().uuidString
         var request: [String: Any] = ["operation": "mlx", "id": id, "action": action]
         if action != "unload" {
@@ -101,7 +144,7 @@ enum MLXTranscriber {
         guard reply.ok == true else {
             throw Failure.message(reply.error ?? "Invalid MLX response")
         }
-        return reply
+        return (reply, response)
     }
 
     static func available(python: String, modelPath: String) async throws -> Bool {

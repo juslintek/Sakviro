@@ -72,6 +72,7 @@ struct MeetingDetailView: View {
     @State private var renamingBookmark: Bookmark?
     @State private var showRewrite = false
     @State private var bookmarkLabelText = ""
+    @State private var showTranscriptionLog = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,6 +92,18 @@ struct MeetingDetailView: View {
             if recordingManager.completedRetranscribeIDs.contains(meeting.id),
                recordingManager.transcriptionJobs[meeting.id] == nil {
                 retranscribeSuccessBanner
+            }
+
+            if showTranscriptionLog && (recordingManager.transcriptionJobs[meeting.id] != nil || !(recordingManager.transcriptionLogs[meeting.id] ?? []).isEmpty) {
+                TranscriptionLiveLogPanel(
+                    entries: recordingManager.transcriptionLogs[meeting.id] ?? [],
+                    isRunning: recordingManager.transcriptionJobs[meeting.id] != nil,
+                    onClose: { showTranscriptionLog = false },
+                    onClear: {
+                        recordingManager.clearTranscriptionLog(for: meeting.id)
+                        showTranscriptionLog = false
+                    }
+                )
             }
 
             if meeting.wasRecovered { recoveredBanner }
@@ -573,12 +586,23 @@ struct MeetingDetailView: View {
     }
 
     private func transcriptionProgressBanner(_ job: TranscriptionJobProgress) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let logCount = recordingManager.transcriptionLogs[meeting.id]?.count ?? 0
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
                 Text(job.statusText)
                     .font(Theme.Typography.caption)
                     .monospacedDigit()
                     .foregroundStyle(Theme.Colors.ink)
+                if let interval = job.intervalText {
+                    Text(interval)
+                        .font(Theme.Typography.mono(10.5, .medium))
+                        .foregroundStyle(Theme.Colors.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.Colors.accent.opacity(0.12), in: Capsule())
+                }
                 Spacer(minLength: 4)
                 if let eta = job.estimatedRemaining(), eta > 0 {
                     let seconds = Int(eta)
@@ -587,6 +611,19 @@ struct MeetingDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(Theme.Colors.ink2)
                 }
+                Button {
+                    showTranscriptionLog.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "terminal")
+                        Text("Live Log\(logCount > 0 ? " (\(logCount))" : "")")
+                        Image(systemName: showTranscriptionLog ? "chevron.up" : "chevron.down")
+                    }
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(showTranscriptionLog ? Theme.Colors.accent : Theme.Colors.ink2)
+                }
+                .buttonStyle(.plain)
+
                 Button("Cancel") {
                     recordingManager.cancelTranscriptionJob(for: meeting.id)
                 }
@@ -596,6 +633,42 @@ struct MeetingDetailView: View {
             }
             ProgressView(value: min(max(job.fraction, 0), 1))
                 .progressViewStyle(.linear)
+
+            if !job.pipelineModels.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(Array(job.pipelineModels.enumerated()), id: \.offset) { index, model in
+                        if index > 0 {
+                            Text("→")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.ink3)
+                        }
+                        if model == job.activeModel {
+                            HStack(spacing: 4) {
+                                Image(systemName: modelIcon(for: model))
+                                Text(model)
+                                    .fontWeight(.semibold)
+                            }
+                            .font(Theme.Typography.mono(10, .medium))
+                            .foregroundStyle(Theme.Colors.accent)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(Theme.Colors.accent.opacity(0.14), in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.Colors.accent.opacity(0.35), lineWidth: 0.8))
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: modelIcon(for: model))
+                                Text(model)
+                            }
+                            .font(Theme.Typography.mono(10, .regular))
+                            .foregroundStyle(Theme.Colors.ink3)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(Theme.Colors.chip.opacity(0.6), in: Capsule())
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -604,14 +677,42 @@ struct MeetingDetailView: View {
         .padding(.bottom, 8)
     }
 
+    private func modelIcon(for name: String) -> String {
+        let lower = name.lowercased()
+        if lower.contains("diariz") || lower.contains("pyannote") {
+            return "person.2"
+        } else if lower.contains("report") || lower.contains("ai") {
+            return "doc.text"
+        } else if lower.contains("groq") || lower.contains("cloud") {
+            return "cloud"
+        } else {
+            return "waveform"
+        }
+    }
+
     private func transcriptionErrorBanner(_ error: String) -> some View {
-        HStack(spacing: 8) {
+        let logCount = recordingManager.transcriptionLogs[meeting.id]?.count ?? 0
+        return HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(Theme.Colors.warn)
             Text(error)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.ink)
             Spacer(minLength: 0)
+            if logCount > 0 {
+                Button {
+                    showTranscriptionLog.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "terminal")
+                        Text("Log (\(logCount))")
+                        Image(systemName: showTranscriptionLog ? "chevron.up" : "chevron.down")
+                    }
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(showTranscriptionLog ? Theme.Colors.accent : Theme.Colors.ink2)
+                }
+                .buttonStyle(.plain)
+            }
             Button("Dismiss") {
                 recordingManager.transcriptionErrors.removeValue(forKey: meeting.id)
             }
@@ -627,13 +728,28 @@ struct MeetingDetailView: View {
     }
 
     private var retranscribeSuccessBanner: some View {
-        HStack(spacing: 8) {
+        let logCount = recordingManager.transcriptionLogs[meeting.id]?.count ?? 0
+        return HStack(spacing: 8) {
             Image(systemName: "checkmark.circle")
                 .foregroundStyle(Theme.Colors.good)
             Text("Transcript updated.")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.ink)
             Spacer(minLength: 0)
+            if logCount > 0 {
+                Button {
+                    showTranscriptionLog.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "terminal")
+                        Text("Log (\(logCount))")
+                        Image(systemName: showTranscriptionLog ? "chevron.up" : "chevron.down")
+                    }
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(showTranscriptionLog ? Theme.Colors.accent : Theme.Colors.ink2)
+                }
+                .buttonStyle(.plain)
+            }
             Button("Rewrite Report") {
                 recordingManager.completedRetranscribeIDs.remove(meeting.id)
                 showRewrite = true
@@ -1483,6 +1599,399 @@ enum PlaybackMix {
             }
         }
         return theirs ? ducked : 1
+    }
+}
+
+struct TranscriptionLiveLogPanel: View {
+    let entries: [TranscriptionLogEntry]
+    let isRunning: Bool
+    let onClose: () -> Void
+    let onClear: () -> Void
+
+    enum LogFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case intervalsAndResponses = "Intervals & Responses"
+        case structuredJSON = "Structured JSON"
+        var id: String { rawValue }
+    }
+
+    @State private var filter: LogFilter = .all
+    @State private var showSkippedSilence = true
+    @State private var followTail = true
+    @State private var expandedEntries: Set<UUID> = []
+    @State private var copied = false
+
+    private static let timeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.S"
+        return df
+    }()
+
+    private var activeSentEntryID: UUID? {
+        guard isRunning else { return nil }
+        guard let lastSentIndex = entries.lastIndex(where: { $0.kind == .intervalSent }) else { return nil }
+        let lastRespIndex = entries.lastIndex(where: { $0.kind == .modelResponse })
+        if let lastRespIndex, lastRespIndex > lastSentIndex {
+            return nil
+        }
+        return entries[lastSentIndex].id
+    }
+
+    private var filteredEntries: [TranscriptionLogEntry] {
+        entries.filter { entry in
+            if !showSkippedSilence && entry.kind == .intervalSkip {
+                return false
+            }
+            switch filter {
+            case .all:
+                return true
+            case .intervalsAndResponses:
+                return entry.kind == .intervalSent || entry.kind == .modelResponse || entry.kind == .diarization || entry.kind == .error || (showSkippedSilence && entry.kind == .intervalSkip)
+            case .structuredJSON:
+                return entry.structuredJSON != nil
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            headerBar
+            Divider()
+            logStream
+        }
+        .frame(height: 290)
+        .background(Theme.Colors.canvas)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Metrics.radius)
+                .strokeBorder(Theme.Colors.line, lineWidth: 1)
+        )
+        .padding(.horizontal, Theme.Metrics.pad)
+        .padding(.bottom, 8)
+    }
+
+    private var headerBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.ink2)
+                Text("Transcription Live Log")
+                    .font(Theme.Typography.sectionLabel)
+                    .foregroundStyle(Theme.Colors.ink)
+
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(isRunning ? Theme.Colors.good : Theme.Colors.ink3)
+                        .frame(width: 6, height: 6)
+                    Text(isRunning ? "Running" : "Finished")
+                        .font(Theme.Typography.mono(10, .medium))
+                        .foregroundStyle(isRunning ? Theme.Colors.good : Theme.Colors.ink2)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(isRunning ? Theme.Colors.good.opacity(0.12) : Theme.Colors.chip, in: Capsule())
+            }
+
+            Spacer(minLength: 4)
+
+            Picker("", selection: $filter) {
+                ForEach(LogFilter.allCases) { f in
+                    Text(f.rawValue).tag(f)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .frame(maxWidth: 240)
+
+            Button {
+                showSkippedSilence.toggle()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: showSkippedSilence ? "checkmark.circle.fill" : "circle")
+                    Text("Silence")
+                }
+                .font(Theme.Typography.caption)
+                .foregroundStyle(showSkippedSilence ? Theme.Colors.accent : Theme.Colors.ink3)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                followTail.toggle()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: followTail ? "arrow.down.to.line.compact" : "pause")
+                    Text("Follow")
+                }
+                .font(Theme.Typography.caption)
+                .foregroundStyle(followTail ? Theme.Colors.accent : Theme.Colors.ink3)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                copyLogToClipboard()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    Text(copied ? "Copied" : "Copy")
+                }
+                .font(Theme.Typography.caption)
+                .foregroundStyle(copied ? Theme.Colors.good : Theme.Colors.ink2)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onClear()
+            } label: {
+                Image(systemName: "trash")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.ink3)
+            }
+            .buttonStyle(.plain)
+            .help("Clear Log")
+
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.ink2)
+            }
+            .buttonStyle(.plain)
+            .help("Close")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Theme.Colors.panel)
+    }
+
+    private var logStream: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 5) {
+                    if filteredEntries.isEmpty {
+                        Text("No log entries match the current filter.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.ink3)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 24)
+                    } else {
+                        ForEach(filteredEntries) { entry in
+                            logRow(entry)
+                                .id(entry.id)
+                        }
+                    }
+                }
+                .padding(8)
+            }
+            .onChange(of: entries.count) { _, _ in
+                if followTail, let last = filteredEntries.last {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
+    private func logRow(_ entry: TranscriptionLogEntry) -> some View {
+        let isExpanded = filter == .structuredJSON || expandedEntries.contains(entry.id)
+        let isActiveSent = activeSentEntryID == entry.id
+
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .center, spacing: 6) {
+                Text(Self.timeFormatter.string(from: entry.timestamp))
+                    .font(Theme.Typography.mono(10))
+                    .foregroundStyle(Theme.Colors.ink3)
+
+                kindBadge(entry.kind)
+
+                Text(entry.modelName)
+                    .font(Theme.Typography.mono(10.5, .medium))
+                    .foregroundStyle(Theme.Colors.ink)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Theme.Colors.chip, in: RoundedRectangle(cornerRadius: 3))
+
+                if let track = entry.trackLabel {
+                    Text(track)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.ink2)
+                }
+
+                if let s = entry.intervalStart, let e = entry.intervalEnd {
+                    let dur = max(0, e - s)
+                    Text("[\(TranscriptionJobProgress.formatTimestamp(s)) → \(TranscriptionJobProgress.formatTimestamp(e)) · \(String(format: "%.1fs", dur))]")
+                        .font(Theme.Typography.mono(10, .medium))
+                        .foregroundStyle(Theme.Colors.accent)
+                }
+
+                if let samples = entry.sampleCount {
+                    Text("\(samples) smp")
+                        .font(Theme.Typography.mono(9.5))
+                        .foregroundStyle(Theme.Colors.ink3)
+                }
+
+                if let ms = entry.elapsedMs {
+                    Text(String(format: "%.2fs", Double(ms) / 1000.0))
+                        .font(Theme.Typography.mono(9.5, .medium))
+                        .foregroundStyle(Theme.Colors.ink2)
+                }
+
+                if isActiveSent {
+                    HStack(spacing: 3) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Running in model…")
+                            .font(Theme.Typography.mono(9.5, .medium))
+                            .foregroundStyle(Theme.Colors.accent)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                if entry.structuredJSON != nil {
+                    Button {
+                        if expandedEntries.contains(entry.id) {
+                            expandedEntries.remove(entry.id)
+                        } else {
+                            expandedEntries.insert(entry.id)
+                        }
+                    } label: {
+                        HStack(spacing: 2) {
+                            Text("{ } Structure")
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        }
+                        .font(Theme.Typography.mono(9.5))
+                        .foregroundStyle(Theme.Colors.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if !entry.summary.isEmpty {
+                Text(entry.summary)
+                    .font(Theme.Typography.mono(10.5))
+                    .foregroundStyle(entry.kind == .error ? Theme.Colors.stop : Theme.Colors.ink)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+
+            if !entry.segments.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(entry.segments, id: \.index) { seg in
+                        HStack(alignment: .top, spacing: 5) {
+                            Text("#\(seg.index)")
+                                .font(Theme.Typography.mono(9.5, .medium))
+                                .foregroundStyle(Theme.Colors.ink3)
+                            Text(String(format: "(%.1fs–%.1fs)", seg.relStart, seg.relEnd))
+                                .font(Theme.Typography.mono(9.5))
+                                .foregroundStyle(Theme.Colors.ink3)
+                            Text("[\(TranscriptionJobProgress.formatTimestamp(seg.absStart)) → \(TranscriptionJobProgress.formatTimestamp(seg.absEnd))]")
+                                .font(Theme.Typography.mono(9.5))
+                                .foregroundStyle(Theme.Colors.accent)
+                            Text(seg.cleanedText.isEmpty ? (seg.rawText.isEmpty ? "(empty / filtered)" : seg.rawText) : seg.cleanedText)
+                                .font(Theme.Typography.mono(10.5))
+                                .foregroundStyle(seg.cleanedText.isEmpty ? Theme.Colors.ink3 : Theme.Colors.ink)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.leading, 12)
+                .padding(.vertical, 2)
+            } else if entry.kind == .modelResponse {
+                if let raw = entry.rawText, !raw.isEmpty {
+                    Text("Filtered raw: \(raw)")
+                        .font(Theme.Typography.mono(9.5))
+                        .foregroundStyle(Theme.Colors.ink3)
+                        .padding(.leading, 12)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if isExpanded, let json = entry.structuredJSON {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    Text(json)
+                        .font(Theme.Typography.mono(10))
+                        .foregroundStyle(Theme.Colors.ink)
+                        .textSelection(.enabled)
+                        .padding(6)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.Colors.canvas.opacity(0.8), in: RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.Colors.line, lineWidth: 0.5))
+                .padding(.leading, 12)
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            isActiveSent
+                ? Theme.Colors.accent.opacity(0.06)
+                : (entry.kind == .error ? Theme.Colors.stop.opacity(0.06) : Color.clear),
+            in: RoundedRectangle(cornerRadius: 4)
+        )
+    }
+
+    @ViewBuilder
+    private func kindBadge(_ kind: TranscriptionLogEntry.Kind) -> some View {
+        let (text, fg, bg): (String, Color, Color) = {
+            switch kind {
+            case .intervalSent:
+                return ("SEND", Theme.Colors.accent, Theme.Colors.accent.opacity(0.14))
+            case .modelResponse:
+                return ("RESP", Theme.Colors.good, Theme.Colors.good.opacity(0.14))
+            case .intervalSkip:
+                return ("SKIP", Theme.Colors.ink3, Theme.Colors.chip)
+            case .diarization:
+                return ("DIARIZE", Color.purple, Color.purple.opacity(0.14))
+            case .lifecycle:
+                return ("STAGE", Theme.Colors.ink2, Theme.Colors.chip)
+            case .error:
+                return ("ERR", Theme.Colors.stop, Theme.Colors.stop.opacity(0.14))
+            }
+        }()
+
+        Text(text)
+            .font(Theme.Typography.mono(9.5, .bold))
+            .foregroundStyle(fg)
+            .padding(.horizontal, 4.5)
+            .padding(.vertical, 1.5)
+            .background(bg, in: RoundedRectangle(cornerRadius: 3))
+    }
+
+    private func copyLogToClipboard() {
+        var output = "=== Transcription Log (\(entries.count) entries) ===\n"
+        for entry in entries {
+            let timeStr = Self.timeFormatter.string(from: entry.timestamp)
+            output += "[\(timeStr)] [\(entry.kind.rawValue.uppercased())] [\(entry.modelName)]"
+            if let track = entry.trackLabel {
+                output += " [\(track)]"
+            }
+            if let s = entry.intervalStart, let e = entry.intervalEnd {
+                output += " [\(TranscriptionJobProgress.formatTimestamp(s)) -> \(TranscriptionJobProgress.formatTimestamp(e))]"
+            }
+            if let ms = entry.elapsedMs {
+                output += " (\(ms)ms)"
+            }
+            output += ": \(entry.summary)\n"
+            if !entry.segments.isEmpty {
+                for seg in entry.segments {
+                    let txt = seg.cleanedText.isEmpty ? (seg.rawText.isEmpty ? "(empty)" : seg.rawText) : seg.cleanedText
+                    output += "  #\(seg.index) [\(TranscriptionJobProgress.formatTimestamp(seg.absStart)) -> \(TranscriptionJobProgress.formatTimestamp(seg.absEnd))]: \(txt)\n"
+                }
+            }
+            if let json = entry.structuredJSON {
+                output += "  Payload:\n\(json)\n"
+            }
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(output, forType: .string)
+        copied = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            copied = false
+        }
     }
 }
 

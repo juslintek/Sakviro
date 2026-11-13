@@ -66,7 +66,36 @@ final class RecordingManager {
     var transcriptionJobs: [UUID: TranscriptionJobProgress] = [:]
     var completedRetranscribeIDs: Set<UUID> = []
     var transcriptionErrors: [UUID: String] = [:]
+    var transcriptionLogs: [UUID: [TranscriptionLogEntry]] = [:]
+    static let diarizerDisplayName = "FluidAudio Pyannote CoreML (Diarizer)"
     @ObservationIgnored private var transcriptionTasks: [UUID: Task<Void, Never>] = [:]
+
+    @MainActor
+    func appendTranscriptionLog(_ entry: TranscriptionLogEntry, for meetingID: UUID) {
+        var entries = transcriptionLogs[meetingID] ?? []
+        entries.append(entry)
+        if entries.count > 500 {
+            entries.removeFirst(entries.count - 500)
+        }
+        transcriptionLogs[meetingID] = entries
+
+        if entry.kind == .intervalSent, let current = transcriptionJobs[meetingID] {
+            transcriptionJobs[meetingID] = TranscriptionJobProgress(
+                meetingID: current.meetingID,
+                fraction: current.fraction,
+                stage: current.stage,
+                startedAt: current.startedAt,
+                activeModel: entry.modelName.isEmpty ? current.activeModel : entry.modelName,
+                pipelineModels: current.pipelineModels,
+                intervalStart: entry.intervalStart,
+                intervalEnd: entry.intervalEnd
+            )
+        }
+    }
+
+    func clearTranscriptionLog(for meetingID: UUID) {
+        transcriptionLogs.removeValue(forKey: meetingID)
+    }
 
     func isBusy(_ meetingID: UUID) -> Bool {
         meetingWork.contains(meetingID)
@@ -929,23 +958,79 @@ final class RecordingManager {
 
     private func runImportWork(meeting: Meeting, audioURL: URL) async {
         let startedAt = Date()
+        transcriptionLogs[meeting.id] = []
+
+        let modelName = transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base"
+        let effectiveLang = MLXTranscriber.isMLX(modelName)
+            ? MLXTranscriber.effectiveLanguage(for: modelName, selected: TranscriptionLanguage.selected)
+            : TranscriptionLanguage.selected
+        let speechModelDisplay = TranscriptionJobProgress.displayModelName(modelID: modelName, backend: .local, language: effectiveLang)
+        let pipelineModels = [speechModelDisplay, Self.diarizerDisplayName, "Report AI"]
+
+        var succeeded = false
         defer {
             importProgress = nil
             transcriptionJobs.removeValue(forKey: meeting.id)
             AppUpdater.shared.becameIdle()
+            if Task.isCancelled {
+                if transcriptionLogs[meeting.id]?.last?.summary != "Cancelled by user" {
+                    appendTranscriptionLog(
+                        TranscriptionLogEntry(
+                            kind: .lifecycle,
+                            modelName: speechModelDisplay,
+                            summary: "Cancelled by user"
+                        ),
+                        for: meeting.id
+                    )
+                }
+            } else if succeeded {
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "Transcription complete"
+                    ),
+                    for: meeting.id
+                )
+            }
         }
 
-        let modelName = transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base"
         transcriptionJobs[meeting.id] = TranscriptionJobProgress(
             meetingID: meeting.id,
             fraction: 0.03,
-            stage: .preparingModel(modelName),
-            startedAt: startedAt
+            stage: .preparingModel(speechModelDisplay),
+            startedAt: startedAt,
+            activeModel: speechModelDisplay,
+            pipelineModels: pipelineModels
+        )
+        appendTranscriptionLog(
+            TranscriptionLogEntry(
+                kind: .lifecycle,
+                modelName: speechModelDisplay,
+                summary: "Preparing speech model \(speechModelDisplay)"
+            ),
+            for: meeting.id
         )
 
         do {
             try await prepareSpeechModel(backend: .local, context: meeting.brief ?? "")
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: speechModelDisplay,
+                    summary: "Speech model \(speechModelDisplay) ready"
+                ),
+                for: meeting.id
+            )
         } catch {
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .error,
+                    modelName: speechModelDisplay,
+                    summary: "Model preparation failed: \(error.localizedDescription)"
+                ),
+                for: meeting.id
+            )
             meeting.status = .failed
             meeting.errorMessage = error.localizedDescription
             try? modelContext?.save()
@@ -959,6 +1044,12 @@ final class RecordingManager {
             return
         }
 
+        let traceCallback: @Sendable (TranscriptionLogEntry) -> Void = { [weak self] entry in
+            Task { @MainActor [weak self] in
+                self?.appendTranscriptionLog(entry, for: meeting.id)
+            }
+        }
+
         // 1. Whole-file, on-device transcription. Every segment is "Them" (one
         //    mixed track, no mic channel to tag "Me"); diarization splits it below.
         do {
@@ -966,16 +1057,43 @@ final class RecordingManager {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     let fraction = total > 0 ? (done / total) : 0
+                    let existingJob = self.transcriptionJobs[meeting.id]
                     self.transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                         meetingID: meeting.id,
                         fraction: 0.05 + 0.75 * fraction,
                         stage: .transcribing(trackLabel: "Audio", completedSeconds: done, totalSeconds: total),
-                        startedAt: startedAt
+                        startedAt: startedAt,
+                        activeModel: existingJob?.activeModel ?? speechModelDisplay,
+                        pipelineModels: pipelineModels,
+                        intervalStart: existingJob?.intervalStart,
+                        intervalEnd: existingJob?.intervalEnd
                     )
                 }
             }
-            let results = try await transcriptionEngine.transcribeFile(url: audioURL, onProgress: onChunkProgress)
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: speechModelDisplay,
+                    trackLabel: audioURL.lastPathComponent,
+                    summary: "Transcribing audio track \(audioURL.lastPathComponent)"
+                ),
+                for: meeting.id
+            )
+            let results = try await transcriptionEngine.transcribeFile(
+                url: audioURL,
+                trackLabel: audioURL.lastPathComponent,
+                onProgress: onChunkProgress,
+                onTrace: traceCallback
+            )
             guard !results.isEmpty else {
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "No speech found in this file"
+                    ),
+                    for: meeting.id
+                )
                 meeting.status = .failed
                 meeting.errorMessage = "No speech found in this file."
                 try? modelContext?.save()
@@ -1003,6 +1121,14 @@ final class RecordingManager {
                 try? modelContext?.save()
                 return
             }
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .error,
+                    modelName: speechModelDisplay,
+                    summary: "Import transcription failed: \(error.localizedDescription)"
+                ),
+                for: meeting.id
+            )
             NSLog("Parrot: import transcription failed, \(error)")
             meeting.status = .failed
             // The raw error is a CoreAudio code ("ExtAudioFileRead -50"): no use
@@ -1027,21 +1153,38 @@ final class RecordingManager {
             meetingID: meeting.id,
             fraction: 0.84,
             stage: .diarizing,
-            startedAt: startedAt
+            startedAt: startedAt,
+            activeModel: Self.diarizerDisplayName,
+            pipelineModels: pipelineModels,
+            intervalStart: nil,
+            intervalEnd: nil
         )
         await postProcess(meeting: meeting)
         if callAnalysisEngine.isEnabled, callAnalysisEngine.provider.isConfigured {
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: "Report AI",
+                    summary: "Generating meeting report and summary"
+                ),
+                for: meeting.id
+            )
             transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                 meetingID: meeting.id,
                 fraction: 0.94,
                 stage: .updatingReport,
-                startedAt: startedAt
+                startedAt: startedAt,
+                activeModel: "Report AI",
+                pipelineModels: pipelineModels,
+                intervalStart: nil,
+                intervalEnd: nil
             )
             callAnalysisEngine.provider.resetUsage()
             await generateSummary(meeting: meeting, includeCoaching: false)
             await writeAbout(meeting)  // the file's name stays its title
         }
         writeAIUsage(meeting: meeting, polishSeconds: 0, backendOverride: .local)
+        succeeded = true
         meeting.status = .done
         try? modelContext?.save()
         await meetingFinished(meeting)
@@ -1571,6 +1714,14 @@ final class RecordingManager {
                 // Cancelled by user
             } catch {
                 self.transcriptionErrors[id] = error.localizedDescription
+                self.appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .error,
+                        modelName: self.transcriptionJobs[id]?.activeModel ?? "Transcription",
+                        summary: "Retranscribe error: \(error.localizedDescription)"
+                    ),
+                    for: id
+                )
             }
         }
     }
@@ -1598,6 +1749,27 @@ final class RecordingManager {
         let startedAt = Date()
         transcriptionErrors.removeValue(forKey: meeting.id)
         completedRetranscribeIDs.remove(meeting.id)
+        transcriptionLogs[meeting.id] = []
+
+        let onDevice = meeting.onDeviceOnly
+            || CloudGate.forcesLocal
+            || UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) != nil
+            || UserDefaults.standard.bool(forKey: TranscriptPolisher.onDeviceKey)
+        let groqKey = onDevice ? nil : (TranscriptionBackend.groq.keychainAccount.flatMap { APIKeyStore.load(account: $0) }?.nilIfEmpty)
+
+        let modelName = (groqKey != nil) ? "whisper-large-v3-turbo" : (transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base")
+        let speechModelDisplay: String
+        if groqKey != nil {
+            let effectiveLang = TranscriptionLanguage.selected
+            speechModelDisplay = TranscriptionJobProgress.displayModelName(modelID: "whisper-large-v3-turbo", backend: .groq, language: effectiveLang)
+        } else {
+            let effectiveLang = MLXTranscriber.isMLX(modelName)
+                ? MLXTranscriber.effectiveLanguage(for: modelName, selected: TranscriptionLanguage.selected)
+                : TranscriptionLanguage.selected
+            speechModelDisplay = TranscriptionJobProgress.displayModelName(modelID: modelName, backend: .local, language: effectiveLang)
+        }
+        let hasSystemAudio = meeting.systemAudioPath.nilIfEmpty != nil
+        let pipelineModels: [String] = hasSystemAudio ? [speechModelDisplay, Self.diarizerDisplayName] : [speechModelDisplay]
 
         var succeeded = false
         defer {
@@ -1606,28 +1778,58 @@ final class RecordingManager {
             transcriptionTasks.removeValue(forKey: meeting.id)
             meeting.status = succeeded ? .done : previousStatus
             try? modelContext.save()
+            if Task.isCancelled {
+                if transcriptionLogs[meeting.id]?.last?.summary != "Cancelled by user" {
+                    appendTranscriptionLog(
+                        TranscriptionLogEntry(
+                            kind: .lifecycle,
+                            modelName: speechModelDisplay,
+                            summary: "Cancelled by user"
+                        ),
+                        for: meeting.id
+                    )
+                }
+            } else if succeeded {
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "Transcription complete"
+                    ),
+                    for: meeting.id
+                )
+            }
         }
 
-        let onDevice = meeting.onDeviceOnly
-            || CloudGate.forcesLocal
-            || UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) != nil
-            || UserDefaults.standard.bool(forKey: TranscriptPolisher.onDeviceKey)
-        let groqKey = onDevice ? nil : (TranscriptionBackend.groq.keychainAccount.flatMap { APIKeyStore.load(account: $0) }?.nilIfEmpty)
-
         // Stage 1: preparingModel (fraction 0.03)
-        let modelName = (groqKey != nil) ? "Groq Whisper" : (transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base")
         transcriptionJobs[meeting.id] = TranscriptionJobProgress(
             meetingID: meeting.id,
             fraction: 0.03,
-            stage: .preparingModel(modelName),
-            startedAt: startedAt
+            stage: .preparingModel(speechModelDisplay),
+            startedAt: startedAt,
+            activeModel: speechModelDisplay,
+            pipelineModels: pipelineModels
+        )
+        appendTranscriptionLog(
+            TranscriptionLogEntry(
+                kind: .lifecycle,
+                modelName: speechModelDisplay,
+                summary: "Starting re-transcription with \(speechModelDisplay)"
+            ),
+            for: meeting.id
         )
         if groqKey == nil {
-            if !transcriptionEngine.isReady {
+            if !transcriptionEngine.isReady || transcriptionEngine.currentModel != modelName {
                 await transcriptionEngine.loadModel(modelName)
             }
         }
         try Task.checkCancellation()
+
+        let traceCallback: @Sendable (TranscriptionLogEntry) -> Void = { [weak self] entry in
+            Task { @MainActor [weak self] in
+                self?.appendTranscriptionLog(entry, for: meeting.id)
+            }
+        }
 
         // Stage 2: transcribing (fraction 0.05 ... 0.80)
         let timeline: ([Float]) async -> [Float]? = { [transcriptionEngine] in
@@ -1636,11 +1838,16 @@ final class RecordingManager {
         let onProgress: @Sendable (String, Double, Double, Double) -> Void = { [weak self] trackLabel, completedSec, totalSec, overallFraction in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let existingJob = self.transcriptionJobs[meeting.id]
                 self.transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                     meetingID: meeting.id,
                     fraction: 0.05 + 0.75 * overallFraction,
                     stage: .transcribing(trackLabel: trackLabel, completedSeconds: completedSec, totalSeconds: totalSec),
-                    startedAt: startedAt
+                    startedAt: startedAt,
+                    activeModel: existingJob?.activeModel ?? speechModelDisplay,
+                    pipelineModels: pipelineModels,
+                    intervalStart: existingJob?.intervalStart,
+                    intervalEnd: existingJob?.intervalEnd
                 )
             }
         }
@@ -1655,7 +1862,8 @@ final class RecordingManager {
                 language: language,
                 apiKey: groqKey,
                 timeline: timeline,
-                onProgress: onProgress
+                onProgress: onProgress,
+                onTrace: traceCallback
             )
         } else {
             polished = try await TranscriptPolisher.polish(
@@ -1663,8 +1871,16 @@ final class RecordingManager {
                 micPath: micPath,
                 timeline: timeline,
                 onProgress: onProgress,
-                transcribeWithProgress: { [transcriptionEngine] _, url, chunkProgress in
-                    let results = try await transcriptionEngine.transcribeFile(url: url, onProgress: chunkProgress)
+                onTrace: traceCallback,
+                transcribeTrack: { [transcriptionEngine] samples, url, trackTimeline, trackLabel, onTrackProgress in
+                    let results = try await transcriptionEngine.transcribeFile(
+                        url: url,
+                        samples: samples,
+                        timeline: trackTimeline,
+                        trackLabel: trackLabel,
+                        onProgress: onTrackProgress,
+                        onTrace: traceCallback
+                    )
                     return results.map { ($0.text, $0.startTime, $0.endTime) }
                 }
             )
@@ -1685,11 +1901,26 @@ final class RecordingManager {
             meetingID: meeting.id,
             fraction: 0.84,
             stage: .diarizing,
-            startedAt: startedAt
+            startedAt: startedAt,
+            activeModel: Self.diarizerDisplayName,
+            pipelineModels: pipelineModels,
+            intervalStart: nil,
+            intervalEnd: nil
         )
         if let sysPath = meeting.systemAudioPath.nilIfEmpty, FileManager.default.fileExists(atPath: sysPath) {
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .diarization,
+                    modelName: Self.diarizerDisplayName,
+                    summary: "Separating remote speakers with \(Self.diarizerDisplayName)…"
+                ),
+                for: meeting.id
+            )
+            let diarStart = DispatchTime.now()
             let audioURL = URL(fileURLWithPath: sysPath)
             if let output = try? await diarizationEngine.diarize(audioURL: audioURL) {
+                let diarEnd = DispatchTime.now()
+                let diarMs = Int((diarEnd.uptimeNanoseconds - diarStart.uptimeNanoseconds) / 1_000_000)
                 let mapping = Self.stableMapping(newEmbeddings: output.embeddings, anchors: [:])
                 let turns = output.segments.map {
                     DiarizationEngine.SpeakerSegmentResult(
@@ -1706,6 +1937,34 @@ final class RecordingManager {
                 let embeddings = Dictionary(uniqueKeysWithValues:
                     output.embeddings.map { (mapping[$0.key] ?? $0.key, $0.value) })
                 meeting.speakerEmbeddingsData = try? JSONEncoder().encode(embeddings)
+
+                var speakerTurnCounts: [String: Int] = [:]
+                for turn in turns {
+                    speakerTurnCounts[turn.speakerLabel, default: 0] += 1
+                }
+                let speakerCount = speakerTurnCounts.keys.count
+                let jsonSummary: [String: Any] = [
+                    "model": Self.diarizerDisplayName,
+                    "elapsedMs": diarMs,
+                    "speakerCount": speakerCount,
+                    "speakers": speakerTurnCounts
+                ]
+                let structuredJSON: String?
+                if let data = try? JSONSerialization.data(withJSONObject: jsonSummary, options: [.prettyPrinted, .sortedKeys]) {
+                    structuredJSON = String(data: data, encoding: .utf8)
+                } else {
+                    structuredJSON = nil
+                }
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .diarization,
+                        modelName: Self.diarizerDisplayName,
+                        elapsedMs: diarMs,
+                        summary: "Diarization complete: \(speakerCount) speakers identified in \(Double(diarMs) / 1000.0)s",
+                        structuredJSON: structuredJSON
+                    ),
+                    for: meeting.id
+                )
             }
         }
         let newLabels = Set(finalSegments.map(\.speaker))
@@ -1722,7 +1981,11 @@ final class RecordingManager {
             meetingID: meeting.id,
             fraction: 0.94,
             stage: .indexingAndSaving,
-            startedAt: startedAt
+            startedAt: startedAt,
+            activeModel: speechModelDisplay,
+            pipelineModels: pipelineModels,
+            intervalStart: nil,
+            intervalEnd: nil
         )
         try Task.checkCancellation()
 
@@ -1749,23 +2012,73 @@ final class RecordingManager {
         guard UserDefaults.standard.bool(forKey: "polishAfterCall"), let modelContext else { return 0 }
         let onDevice = UserDefaults.standard.object(forKey: AssistantRoutingSettings.enabledKey) != nil
             || UserDefaults.standard.bool(forKey: TranscriptPolisher.onDeviceKey)
+        let groqKey = onDevice ? nil : (TranscriptionBackend.groq.keychainAccount.flatMap { APIKeyStore.load(account: $0) }?.nilIfEmpty)
+
+        let modelName = (groqKey != nil) ? "whisper-large-v3-turbo" : (transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base")
+        let speechModelDisplay: String
+        if groqKey != nil {
+            let effectiveLang = TranscriptionLanguage.selected
+            speechModelDisplay = TranscriptionJobProgress.displayModelName(modelID: "whisper-large-v3-turbo", backend: .groq, language: effectiveLang)
+        } else {
+            let effectiveLang = MLXTranscriber.isMLX(modelName)
+                ? MLXTranscriber.effectiveLanguage(for: modelName, selected: TranscriptionLanguage.selected)
+                : TranscriptionLanguage.selected
+            speechModelDisplay = TranscriptionJobProgress.displayModelName(modelID: modelName, backend: .local, language: effectiveLang)
+        }
+        let hasSystemAudio = meeting.systemAudioPath.nilIfEmpty != nil
+        let pipelineModels: [String] = hasSystemAudio ? [speechModelDisplay, Self.diarizerDisplayName] : [speechModelDisplay]
+
         let timeline: ([Float]) async -> [Float]? = { [transcriptionEngine] in
             await transcriptionEngine.speechTimeline(samples: $0)
         }
 
+        transcriptionLogs[meeting.id] = []
         let startedAt = Date()
+        var succeeded = false
         defer {
             transcriptionJobs.removeValue(forKey: meeting.id)
+            if Task.isCancelled {
+                if transcriptionLogs[meeting.id]?.last?.summary != "Cancelled by user" {
+                    appendTranscriptionLog(
+                        TranscriptionLogEntry(
+                            kind: .lifecycle,
+                            modelName: speechModelDisplay,
+                            summary: "Cancelled by user"
+                        ),
+                        for: meeting.id
+                    )
+                }
+            } else if succeeded {
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "Transcription complete"
+                    ),
+                    for: meeting.id
+                )
+            }
+        }
+
+        let traceCallback: @Sendable (TranscriptionLogEntry) -> Void = { [weak self] entry in
+            Task { @MainActor [weak self] in
+                self?.appendTranscriptionLog(entry, for: meeting.id)
+            }
         }
 
         let onProgress: @Sendable (String, Double, Double, Double) -> Void = { [weak self] trackLabel, completedSec, totalSec, overallFraction in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let existingJob = self.transcriptionJobs[meeting.id]
                 self.transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                     meetingID: meeting.id,
                     fraction: 0.05 + 0.75 * overallFraction,
                     stage: .transcribing(trackLabel: trackLabel, completedSeconds: completedSec, totalSeconds: totalSec),
-                    startedAt: startedAt
+                    startedAt: startedAt,
+                    activeModel: existingJob?.activeModel ?? speechModelDisplay,
+                    pipelineModels: pipelineModels,
+                    intervalStart: existingJob?.intervalStart,
+                    intervalEnd: existingJob?.intervalEnd
                 )
             }
         }
@@ -1773,12 +2086,21 @@ final class RecordingManager {
         do {
             let polished: (segments: [TranscriptPolisher.PolishedSegment], micHearsSpeakers: Bool)
             if onDevice {
-                let modelName = transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base"
                 transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                     meetingID: meeting.id,
                     fraction: 0.03,
-                    stage: .preparingModel(modelName),
-                    startedAt: startedAt
+                    stage: .preparingModel(speechModelDisplay),
+                    startedAt: startedAt,
+                    activeModel: speechModelDisplay,
+                    pipelineModels: pipelineModels
+                )
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "Starting transcript polish with \(speechModelDisplay)"
+                    ),
+                    for: meeting.id
                 )
                 // The import path: whole track, Whisper's own timestamps, nothing leaves the Mac.
                 polished = try await TranscriptPolisher.polish(
@@ -1786,8 +2108,16 @@ final class RecordingManager {
                     micPath: meeting.micAudioPath?.nilIfEmpty,
                     timeline: timeline,
                     onProgress: onProgress,
-                    transcribeWithProgress: { [transcriptionEngine] _, url, chunkProgress in
-                        let results = try await transcriptionEngine.transcribeFile(url: url, onProgress: chunkProgress)
+                    onTrace: traceCallback,
+                    transcribeTrack: { [transcriptionEngine] samples, url, trackTimeline, trackLabel, onTrackProgress in
+                        let results = try await transcriptionEngine.transcribeFile(
+                            url: url,
+                            samples: samples,
+                            timeline: trackTimeline,
+                            trackLabel: trackLabel,
+                            onProgress: onTrackProgress,
+                            onTrace: traceCallback
+                        )
                         return results.map { ($0.text, $0.startTime, $0.endTime) }
                     }
                 )
@@ -1798,8 +2128,18 @@ final class RecordingManager {
                 transcriptionJobs[meeting.id] = TranscriptionJobProgress(
                     meetingID: meeting.id,
                     fraction: 0.03,
-                    stage: .preparingModel("Groq Whisper"),
-                    startedAt: startedAt
+                    stage: .preparingModel(speechModelDisplay),
+                    startedAt: startedAt,
+                    activeModel: speechModelDisplay,
+                    pipelineModels: pipelineModels
+                )
+                appendTranscriptionLog(
+                    TranscriptionLogEntry(
+                        kind: .lifecycle,
+                        modelName: speechModelDisplay,
+                        summary: "Starting transcript polish with \(speechModelDisplay)"
+                    ),
+                    for: meeting.id
                 )
                 let setting = UserDefaults.standard.string(forKey: "transcriptionLanguage")
                 polished = try await TranscriptPolisher.polish(
@@ -1808,7 +2148,8 @@ final class RecordingManager {
                     language: (setting == nil || setting == "auto") ? nil : setting,
                     apiKey: key,
                     timeline: timeline,
-                    onProgress: onProgress
+                    onProgress: onProgress,
+                    onTrace: traceCallback
                 )
             }
             guard !polished.segments.isEmpty else { return 0 }
@@ -1835,12 +2176,21 @@ final class RecordingManager {
             }
             try? modelContext.save()
             NSLog("Parrot: transcript polished — \(lines.count) segments, \(polished.segments.count - lines.count) echo lines dropped by text")
+            succeeded = true
             // Billed audio ≈ call duration per re-transcribed track; on this Mac it's free.
             guard !onDevice else { return 0 }
             let tracks = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty]
                 .compactMap { $0 }.count
             return meeting.duration * Double(tracks)
         } catch {
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .error,
+                    modelName: speechModelDisplay,
+                    summary: "Polish failed: \(error.localizedDescription)"
+                ),
+                for: meeting.id
+            )
             NSLog("Parrot: polish failed, keeping live transcript — \(error.localizedDescription)")
             return 0
         }
@@ -1989,9 +2339,21 @@ final class RecordingManager {
         guard let audioPath = meeting.systemAudioPath.nilIfEmpty,
               FileManager.default.fileExists(atPath: audioPath) else { return false }
 
+        appendTranscriptionLog(
+            TranscriptionLogEntry(
+                kind: .diarization,
+                modelName: Self.diarizerDisplayName,
+                summary: "Separating remote speakers with \(Self.diarizerDisplayName)…"
+            ),
+            for: meeting.id
+        )
+        let diarStart = DispatchTime.now()
+
         do {
             let audioURL = URL(fileURLWithPath: audioPath)
             let output = try await diarizationEngine.diarize(audioURL: audioURL)
+            let diarEnd = DispatchTime.now()
+            let diarMs = Int((diarEnd.uptimeNanoseconds - diarStart.uptimeNanoseconds) / 1_000_000)
 
             // Continuity with any live sweeps: keep the identities the user
             // watched during the call. Empty anchors → identity mapping, so
@@ -2020,8 +2382,48 @@ final class RecordingManager {
             // Names given during the call: one name, one person.
             meeting.mergeSameNamedSpeakers()
             try? modelContext?.save()
+
+            var speakerTurnCounts: [String: Int] = [:]
+            for turn in turns {
+                speakerTurnCounts[turn.speakerLabel, default: 0] += 1
+            }
+            let speakerCount = speakerTurnCounts.keys.count
+            let jsonSummary: [String: Any] = [
+                "model": Self.diarizerDisplayName,
+                "elapsedMs": diarMs,
+                "speakerCount": speakerCount,
+                "speakers": speakerTurnCounts
+            ]
+            let structuredJSON: String?
+            if let data = try? JSONSerialization.data(withJSONObject: jsonSummary, options: [.prettyPrinted, .sortedKeys]) {
+                structuredJSON = String(data: data, encoding: .utf8)
+            } else {
+                structuredJSON = nil
+            }
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .diarization,
+                    modelName: Self.diarizerDisplayName,
+                    elapsedMs: diarMs,
+                    summary: "Diarization complete: \(speakerCount) speakers identified in \(Double(diarMs) / 1000.0)s",
+                    structuredJSON: structuredJSON
+                ),
+                for: meeting.id
+            )
+
             return true
         } catch {
+            let diarEnd = DispatchTime.now()
+            let diarMs = Int((diarEnd.uptimeNanoseconds - diarStart.uptimeNanoseconds) / 1_000_000)
+            appendTranscriptionLog(
+                TranscriptionLogEntry(
+                    kind: .error,
+                    modelName: Self.diarizerDisplayName,
+                    elapsedMs: diarMs,
+                    summary: "Diarization failed: \(error.localizedDescription)"
+                ),
+                for: meeting.id
+            )
             // Diarization is a refinement pass; the audio and transcript are
             // already saved. Keep the generic "Them" labels rather than showing
             // a perfectly good meeting as failed.

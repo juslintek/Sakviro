@@ -1,5 +1,70 @@
 import Foundation
 
+struct TranscriptionLogEntry: Identifiable, Equatable, Sendable {
+    enum Kind: String, Equatable, Sendable {
+        case lifecycle
+        case intervalSent
+        case modelResponse
+        case intervalSkip
+        case diarization
+        case error
+    }
+
+    struct SegmentItem: Equatable, Sendable {
+        let index: Int
+        let relStart: Double
+        let relEnd: Double
+        let absStart: Double
+        let absEnd: Double
+        let rawText: String
+        let cleanedText: String
+    }
+
+    let id: UUID
+    let timestamp: Date
+    let kind: Kind
+    let modelName: String
+    let trackLabel: String?
+    let intervalStart: Double?
+    let intervalEnd: Double?
+    let sampleCount: Int?
+    let elapsedMs: Int?
+    let summary: String
+    let rawText: String?
+    let segments: [SegmentItem]
+    let structuredJSON: String?
+
+    init(
+        id: UUID = UUID(),
+        timestamp: Date = .now,
+        kind: Kind,
+        modelName: String,
+        trackLabel: String? = nil,
+        intervalStart: Double? = nil,
+        intervalEnd: Double? = nil,
+        sampleCount: Int? = nil,
+        elapsedMs: Int? = nil,
+        summary: String,
+        rawText: String? = nil,
+        segments: [SegmentItem] = [],
+        structuredJSON: String? = nil
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.kind = kind
+        self.modelName = modelName
+        self.trackLabel = trackLabel
+        self.intervalStart = intervalStart
+        self.intervalEnd = intervalEnd
+        self.sampleCount = sampleCount
+        self.elapsedMs = elapsedMs
+        self.summary = summary
+        self.rawText = rawText
+        self.segments = segments
+        self.structuredJSON = structuredJSON
+    }
+}
+
 struct TranscriptionJobProgress: Equatable, Sendable {
     enum Stage: Equatable, Sendable {
         case preparingModel(String)
@@ -13,6 +78,30 @@ struct TranscriptionJobProgress: Equatable, Sendable {
     let fraction: Double
     let stage: Stage
     let startedAt: Date
+    let activeModel: String
+    let pipelineModels: [String]
+    let intervalStart: Double?
+    let intervalEnd: Double?
+
+    init(
+        meetingID: UUID,
+        fraction: Double,
+        stage: Stage,
+        startedAt: Date,
+        activeModel: String = "",
+        pipelineModels: [String] = [],
+        intervalStart: Double? = nil,
+        intervalEnd: Double? = nil
+    ) {
+        self.meetingID = meetingID
+        self.fraction = fraction
+        self.stage = stage
+        self.startedAt = startedAt
+        self.activeModel = activeModel
+        self.pipelineModels = pipelineModels
+        self.intervalStart = intervalStart
+        self.intervalEnd = intervalEnd
+    }
 
     var statusText: String {
         let pct = Int((min(max(fraction, 0), 1) * 100).rounded())
@@ -24,6 +113,48 @@ struct TranscriptionJobProgress: Equatable, Sendable {
         case .indexingAndSaving: return "Indexing transcript… \(pct)%"
         case .updatingReport: return "Updating report… \(pct)%"
         }
+    }
+
+    var intervalText: String? {
+        guard let s = intervalStart, let e = intervalEnd, e >= s else { return nil }
+        return "\(Self.formatTimestamp(s)) → \(Self.formatTimestamp(e))"
+    }
+
+    static func formatTimestamp(_ seconds: Double) -> String {
+        let clamped = max(0, seconds)
+        let whole = Int(clamped)
+        let tenths = Int(((clamped - Double(whole)) * 10).rounded()) % 10
+        let h = whole / 3600
+        let m = (whole % 3600) / 60
+        let s = whole % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d.%d", h, m, s, tenths)
+        }
+        return String(format: "%02d:%02d.%d", m, s, tenths)
+    }
+
+    static func displayModelName(modelID: String, backend: TranscriptionBackend = .local, language: String? = nil) -> String {
+        let base: String
+        switch backend {
+        case .groq:
+            base = "Groq Whisper Large v3 Turbo"
+        case .deepgram:
+            base = "Deepgram \(modelID.isEmpty ? "Nova-3" : modelID)"
+        case .local:
+            if let mlxMatch = MLXTranscriber.models.first(where: { $0.id == modelID }) {
+                base = "\(mlxMatch.name) (\(modelID))"
+            } else if modelID == "parakeet-v3" {
+                base = "FluidAudio Parakeet v3"
+            } else if modelID.isEmpty {
+                base = "On-device Whisper"
+            } else {
+                base = modelID
+            }
+        }
+        if let lang = language, !lang.isEmpty, lang != "auto" {
+            return "\(base) · \(lang)"
+        }
+        return base
     }
 
     func estimatedRemaining(now: Date = .now) -> TimeInterval? {
@@ -414,14 +545,17 @@ enum TranscriptPolisher {
         language: String?,
         apiKey: String,
         timeline: ([Float]) async -> [Float]? = { _ in nil },
-        onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil
+        onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil,
+        onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil
     ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
-        try await polish(
+        let modelLabel = TranscriptionJobProgress.displayModelName(modelID: GroqTranscriber.model, backend: .groq, language: language)
+        return try await polish(
             systemPath: systemPath,
             micPath: micPath,
             timeline: timeline,
-            onProgress: onProgress
-        ) { samples, _, reportTrackProgress in
+            onProgress: onProgress,
+            onTrace: onTrace
+        ) { samples, _, _, trackLabel, reportTrackProgress in
             var lines: [Line] = []
             let partLength = 16000 * partSeconds
             var offset = 0
@@ -429,12 +563,80 @@ enum TranscriptPolisher {
             reportTrackProgress?(0, trackTotalSeconds)
             while offset < samples.count {
                 try Task.checkCancellation()
-                let part = Array(samples[offset ..< min(offset + partLength, samples.count)])
+                let partEnd = min(offset + partLength, samples.count)
+                let part = Array(samples[offset ..< partEnd])
                 let shift = Double(offset) / 16000.0
-                // No glossary prompt here either (see the live Groq decode).
+                let from = shift
+                let to = Double(partEnd) / 16000.0
+
+                onTrace?(TranscriptionLogEntry(
+                    kind: .intervalSent,
+                    modelName: modelLabel,
+                    trackLabel: trackLabel,
+                    intervalStart: from,
+                    intervalEnd: to,
+                    sampleCount: part.count,
+                    summary: "Sent \(TranscriptionJobProgress.formatTimestamp(from)) → \(TranscriptionJobProgress.formatTimestamp(to)) (\(String(format: "%.1f", to - from))s) to Groq"
+                ))
+
+                let t0 = Date()
                 let segments = try await GroqTranscriber.transcribeFile(
                     WAVEncoder.encode(samples: part, sampleRate: 16000),
                     fileName: "part.wav", language: language, apiKey: apiKey)
+                let elapsedMs = max(1, Int(Date().timeIntervalSince(t0) * 1000))
+
+                var segItems: [TranscriptionLogEntry.SegmentItem] = []
+                for (idx, seg) in segments.enumerated() {
+                    let cleaned = TranscriptionEngine.cleaned(seg.text)
+                    segItems.append(TranscriptionLogEntry.SegmentItem(
+                        index: idx,
+                        relStart: seg.start,
+                        relEnd: seg.end,
+                        absStart: seg.start + shift,
+                        absEnd: seg.end + shift,
+                        rawText: seg.text,
+                        cleanedText: cleaned
+                    ))
+                }
+
+                let responseObj: [String: Any] = [
+                    "model": GroqTranscriber.model,
+                    "track": trackLabel,
+                    "interval": [from, to],
+                    "elapsedMs": elapsedMs,
+                    "segmentCount": segments.count,
+                    "segments": segItems.map { [
+                        "index": $0.index,
+                        "relStart": $0.relStart,
+                        "relEnd": $0.relEnd,
+                        "absStart": $0.absStart,
+                        "absEnd": $0.absEnd,
+                        "text": $0.rawText
+                    ] }
+                ]
+                let jsonStr: String?
+                if let jsonData = try? JSONSerialization.data(withJSONObject: responseObj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+                    jsonStr = String(data: jsonData, encoding: .utf8)
+                } else {
+                    jsonStr = nil
+                }
+
+                let fullRawText = segments.map(\.text).joined(separator: " ")
+                let rtf = (to - from) / max(Double(elapsedMs) / 1000.0, 0.001)
+                onTrace?(TranscriptionLogEntry(
+                    kind: .modelResponse,
+                    modelName: modelLabel,
+                    trackLabel: trackLabel,
+                    intervalStart: from,
+                    intervalEnd: to,
+                    sampleCount: part.count,
+                    elapsedMs: elapsedMs,
+                    summary: "\(segments.count) segment(s) in \(String(format: "%.2fs", Double(elapsedMs)/1000.0)) (\(String(format: "%.1fx", rtf)) realtime)",
+                    rawText: fullRawText,
+                    segments: segItems,
+                    structuredJSON: jsonStr
+                ))
+
                 lines += segments.map { (TranscriptionEngine.cleaned($0.text), $0.start + shift, $0.end + shift) }
                 offset += partLength
                 reportTrackProgress?(min(Double(offset) / 16000.0, trackTotalSeconds), trackTotalSeconds)
@@ -476,6 +678,25 @@ enum TranscriptPolisher {
         timeline: ([Float]) async -> [Float]? = { _ in nil },
         onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)?,
         transcribeWithProgress: ([Float], URL, (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)?) async throws -> [Line]
+    ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
+        try await polish(
+            systemPath: systemPath,
+            micPath: micPath,
+            timeline: timeline,
+            onProgress: onProgress,
+            onTrace: nil
+        ) { samples, url, _, _, trackProgress in
+            try await transcribeWithProgress(samples, url, trackProgress)
+        }
+    }
+
+    static func polish(
+        systemPath: String?,
+        micPath: String?,
+        timeline: ([Float]) async -> [Float]? = { _ in nil },
+        onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil,
+        onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil,
+        transcribeTrack: (_ samples: [Float], _ url: URL, _ trackTimeline: [Float]?, _ trackLabel: String, _ onTrackProgress: (@Sendable (Double, Double) -> Void)?) async throws -> [Line]
     ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
         struct TrackItem: Sendable {
             let path: String
@@ -529,13 +750,35 @@ enum TranscriptPolisher {
             // The system track comes first; keep only its loudness for the Me pass.
             let levels = EchoGate.envelope(track.samples[...])
             if track.speaker == "Them" { themLevels = levels }
-            let voice = await timeline(track.samples)
 
-            let lines = try await transcribeWithProgress(track.samples, track.url, trackProgress)
+            let vadStart = Date()
+            let trackTimeline = await timeline(track.samples)
+            let vadMs = max(1, Int(Date().timeIntervalSince(vadStart) * 1000))
+
+            if let trackTimeline {
+                let voicedCount = trackTimeline.filter { $0 >= TranscriptionEngine.speechThreshold }.count
+                let voicedPct = Int((Double(voicedCount) / Double(max(trackTimeline.count, 1)) * 100).rounded())
+                onTrace?(TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: "VAD",
+                    trackLabel: track.label,
+                    elapsedMs: vadMs,
+                    summary: "Loaded \(track.label) (\(String(format: "%.1f", trackDuration))s) · VAD speech timeline ready in \(vadMs)ms (\(voicedPct)% voiced)"
+                ))
+            } else {
+                onTrace?(TranscriptionLogEntry(
+                    kind: .lifecycle,
+                    modelName: "Audio",
+                    trackLabel: track.label,
+                    summary: "Loaded \(track.label) (\(String(format: "%.1f", trackDuration))s)"
+                ))
+            }
+
+            let lines = try await transcribeTrack(track.samples, track.url, trackTimeline, track.label, trackProgress)
 
             for s in lines {
                 guard !s.text.isEmpty else { continue }
-                if let voice, !TranscriptionEngine.hasVoice(voice, from: s.start, to: s.end) {
+                if let trackTimeline, !TranscriptionEngine.hasVoice(trackTimeline, from: s.start, to: s.end) {
                     continue
                 }
                 let line = PolishedSegment(text: s.text, start: s.start, end: s.end, speaker: track.speaker)

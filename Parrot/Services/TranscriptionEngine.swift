@@ -1657,16 +1657,27 @@ final class TranscriptionEngine {
     /// WhisperKit loads + resamples any format (m4a/mp3/wav/aac/caf) to 16 kHz mono.
     func transcribeFile(
         url: URL,
-        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil
+        samples providedSamples: [Float]? = nil,
+        timeline providedTimeline: [Float]? = nil,
+        trackLabel: String = "Audio",
+        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil,
+        onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil
     ) async throws -> [TranscriptionResult] {
-        let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
+        let samples = try providedSamples ?? AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
         let totalSeconds = max(Double(samples.count) / 16000.0, 0.001)
         if !samples.isEmpty {
             onProgress?(0, totalSeconds)
         }
 
         if Self.isMLX(currentModel) {
-            let timeline = await speechTimeline(url: url)
+            let timeline: [Float]?
+            if let providedTimeline {
+                timeline = providedTimeline
+            } else {
+                timeline = await speechTimeline(samples: samples, url: url)
+            }
+            let language = MLXTranscriber.effectiveLanguage(for: currentModel, selected: TranscriptionLanguage.selected)
+            let modelLabel = TranscriptionJobProgress.displayModelName(modelID: currentModel, backend: .local, language: language)
             var lines: [TranscriptionResult] = []
             var start = 0
             while start < samples.count {
@@ -1674,34 +1685,179 @@ final class TranscriptionEngine {
                 let end = (try? MLXTranscriber.importBoundary(samples, from: start)) ?? min(samples.count, start + 480_000)
                 guard end > start else { break }
                 let from = Double(start) / 16000.0, to = Double(end) / 16000.0
-                if timeline.map({ Self.hasVoice($0, from: from, to: to) }) ?? true {
-                    let language = MLXTranscriber.effectiveLanguage(for: currentModel, selected: TranscriptionLanguage.selected)
-                    let segments = try await MLXTranscriber.performSegments(
-                        samples: Self.normalizedForDecode(Array(samples[start..<end])),
-                        model: currentModel,
-                        language: language
-                    )
-                    let chunkOffset = Double(start) / 16000.0
-                    for seg in segments {
-                        let segStart = chunkOffset + max(0, seg.start)
-                        let segEnd = min(Double(end) / 16000.0, chunkOffset + max(seg.end, seg.start + 0.1))
-                        let text = Self.cleaned(seg.text)
-                        if !text.isEmpty {
-                            lines.append(TranscriptionResult(text: text, source: .them, startTime: segStart, endTime: segEnd, confidence: 1.0))
+                if let timeline, !Self.hasVoice(timeline, from: from, to: to) {
+                    onTrace?(TranscriptionLogEntry(
+                        kind: .intervalSkip,
+                        modelName: modelLabel,
+                        trackLabel: trackLabel,
+                        intervalStart: from,
+                        intervalEnd: to,
+                        sampleCount: end - start,
+                        summary: "Skipped silent interval \(TranscriptionJobProgress.formatTimestamp(from)) → \(TranscriptionJobProgress.formatTimestamp(to)) (no voice in VAD)"
+                    ))
+                    onProgress?(to, totalSeconds)
+                    start = end
+                    continue
+                }
+
+                var sendStart = start
+                var sendEnd = end
+                if let timeline {
+                    var firstVoiced: Double? = nil
+                    var lastVoiced: Double? = nil
+                    var t = from
+                    while t < to {
+                        let stepEnd = min(t + 0.25, to)
+                        if Self.hasVoice(timeline, from: t, to: stepEnd, pad: 0.25) {
+                            if firstVoiced == nil { firstVoiced = t }
+                            lastVoiced = stepEnd
+                        }
+                        t += 0.25
+                    }
+                    if let fv = firstVoiced, let lv = lastVoiced {
+                        let trimmedFrom = max(from, fv - 0.35)
+                        let trimmedTo = min(to, lv + 0.35)
+                        let sStart = max(start, Int(trimmedFrom * 16000.0))
+                        let sEnd = min(end, Int(trimmedTo * 16000.0))
+                        if sEnd - sStart >= 8_000 {
+                            sendStart = sStart
+                            sendEnd = sEnd
                         }
                     }
                 }
-                onProgress?(Double(end) / 16000.0, totalSeconds)
+
+                let sendFrom = Double(sendStart) / 16000.0
+                let sendTo = Double(sendEnd) / 16000.0
+
+                let reqPayload: [String: Any] = [
+                    "model": currentModel,
+                    "displayModel": modelLabel,
+                    "language": language ?? "auto",
+                    "track": trackLabel,
+                    "chunkWindowSec": [((from * 1000).rounded() / 1000), ((to * 1000).rounded() / 1000)],
+                    "sentIntervalSec": [((sendFrom * 1000).rounded() / 1000), ((sendTo * 1000).rounded() / 1000)],
+                    "durationSec": (((sendTo - sendFrom) * 1000).rounded() / 1000),
+                    "samples": sendEnd - sendStart
+                ]
+                let reqJSON = (try? JSONSerialization.data(withJSONObject: reqPayload, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
+
+                onTrace?(TranscriptionLogEntry(
+                    kind: .intervalSent,
+                    modelName: modelLabel,
+                    trackLabel: trackLabel,
+                    intervalStart: sendFrom,
+                    intervalEnd: sendTo,
+                    sampleCount: sendEnd - sendStart,
+                    summary: "Sent \(TranscriptionJobProgress.formatTimestamp(sendFrom)) → \(TranscriptionJobProgress.formatTimestamp(sendTo)) (\(String(format: "%.1f", sendTo - sendFrom))s) to \(modelLabel)",
+                    structuredJSON: reqJSON
+                ))
+
+                let detailed = try await MLXTranscriber.performDetailed(
+                    samples: Self.normalizedForDecode(Array(samples[sendStart..<sendEnd])),
+                    model: currentModel,
+                    language: language
+                )
+
+                let chunkOffset = sendFrom
+                var chunkLines: [TranscriptionResult] = []
+                var segmentItems: [TranscriptionLogEntry.SegmentItem] = []
+
+                for (idx, seg) in detailed.segments.enumerated() {
+                    let segStart = chunkOffset + max(0, seg.start)
+                    let segEnd = min(sendTo, chunkOffset + max(seg.end, seg.start + 0.1))
+                    let cleaned = Self.cleaned(seg.text)
+                    if !cleaned.isEmpty {
+                        chunkLines.append(TranscriptionResult(text: cleaned, source: .them, startTime: segStart, endTime: segEnd, confidence: 1.0))
+                    }
+                    segmentItems.append(TranscriptionLogEntry.SegmentItem(
+                        index: idx,
+                        relStart: seg.start,
+                        relEnd: seg.end,
+                        absStart: segStart,
+                        absEnd: segEnd,
+                        rawText: seg.text,
+                        cleanedText: cleaned
+                    ))
+                }
+                lines.append(contentsOf: chunkLines)
+
+                let rtf = (sendTo - sendFrom) / max(Double(detailed.elapsedMs) / 1000.0, 0.001)
+
+                var segDicts: [[String: Any]] = []
+                for (idx, seg) in detailed.segments.enumerated() {
+                    let segStart = chunkOffset + max(0, seg.start)
+                    let segEnd = min(sendTo, chunkOffset + max(seg.end, seg.start + 0.1))
+                    var dict: [String: Any] = [
+                        "index": idx,
+                        "relStart": ((seg.start * 1000).rounded() / 1000),
+                        "relEnd": ((seg.end * 1000).rounded() / 1000),
+                        "absStart": ((segStart * 1000).rounded() / 1000),
+                        "absEnd": ((segEnd * 1000).rounded() / 1000),
+                        "text": seg.text
+                    ]
+                    if let lp = seg.avg_logprob { dict["avg_logprob"] = lp }
+                    if let nsp = seg.no_speech_prob { dict["no_speech_prob"] = nsp }
+                    segDicts.append(dict)
+                }
+
+                let structuredResponse: [String: Any] = [
+                    "request": [
+                        "model": currentModel,
+                        "displayModel": modelLabel,
+                        "language": language ?? "auto",
+                        "track": trackLabel,
+                        "chunkWindowSec": [((from * 1000).rounded() / 1000), ((to * 1000).rounded() / 1000)],
+                        "sentIntervalSec": [((sendFrom * 1000).rounded() / 1000), ((sendTo * 1000).rounded() / 1000)],
+                        "durationSec": (((sendTo - sendFrom) * 1000).rounded() / 1000),
+                        "samples": sendEnd - sendStart
+                    ],
+                    "response": [
+                        "elapsedMs": detailed.elapsedMs,
+                        "realtimeFactor": ((rtf * 10).rounded() / 10),
+                        "detectedLanguage": detailed.language ?? "",
+                        "rawText": detailed.rawText,
+                        "acceptedSegments": chunkLines.count,
+                        "segments": segDicts
+                    ]
+                ]
+
+                let respJSON = (try? JSONSerialization.data(withJSONObject: structuredResponse, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
+
+                onTrace?(TranscriptionLogEntry(
+                    kind: .modelResponse,
+                    modelName: modelLabel,
+                    trackLabel: trackLabel,
+                    intervalStart: sendFrom,
+                    intervalEnd: sendTo,
+                    sampleCount: sendEnd - sendStart,
+                    elapsedMs: detailed.elapsedMs,
+                    summary: "\(segmentItems.count) segment(s) in \(String(format: "%.2fs", Double(detailed.elapsedMs)/1000.0)) (\(String(format: "%.1fx", rtf)) realtime)",
+                    rawText: detailed.rawText,
+                    segments: segmentItems,
+                    structuredJSON: respJSON
+                ))
+
+                onProgress?(to, totalSeconds)
                 start = end
             }
             return lines
         }
-        if let parakeet, let lines = try await parakeetImport(url: url, samples: samples, totalSeconds: totalSeconds, parakeet: parakeet, onProgress: onProgress) { return lines }
+        if let parakeet, let lines = try await parakeetImport(
+            url: url,
+            samples: samples,
+            timeline: providedTimeline,
+            trackLabel: trackLabel,
+            totalSeconds: totalSeconds,
+            parakeet: parakeet,
+            onProgress: onProgress,
+            onTrace: onTrace
+        ) { return lines }
         // Whisper: on Parakeet, loaded for this file only when it needs it.
         guard let whisperKit = await ensureWhisper() else { throw RecordingError.modelNotReady }
 
         let setting = UserDefaults.standard.string(forKey: "transcriptionLanguage")
         let language = (setting == nil || setting == "auto") ? nil : setting
+        let modelLabel = TranscriptionJobProgress.displayModelName(modelID: currentModel, backend: .local, language: language)
 
         var options = DecodingOptions(
             task: .transcribe,
@@ -1722,31 +1878,102 @@ final class TranscriptionEngine {
         // only with a prompt/timestamp combo that a real file proves works.
         glossaryActive = false
 
+        onTrace?(TranscriptionLogEntry(
+            kind: .intervalSent,
+            modelName: modelLabel,
+            trackLabel: trackLabel,
+            intervalStart: 0,
+            intervalEnd: totalSeconds,
+            sampleCount: samples.count,
+            summary: "Sent \(trackLabel) (\(String(format: "%.1f", totalSeconds))s) to \(modelLabel)"
+        ))
+
+        let t0 = Date()
         try Task.checkCancellation()
         let results = try await whisperKit.transcribe(audioPath: url.path, decodeOptions: options)
         try Task.checkCancellation()
+        let elapsedMs = max(1, Int(Date().timeIntervalSince(t0) * 1000))
         onProgress?(totalSeconds, totalSeconds)
-        let timeline = await speechTimeline(url: url)
+        let timeline: [Float]?
+        if let providedTimeline {
+            timeline = providedTimeline
+        } else {
+            timeline = await speechTimeline(samples: samples, url: url)
+        }
+
+        var segItems: [TranscriptionLogEntry.SegmentItem] = []
+        var lines: [TranscriptionResult] = []
 
         // One mixed track, so every segment is "Them"; diarization splits it later.
-        return results.flatMap(\.segments).compactMap { segment in
+        for (idx, segment) in results.flatMap(\.segments).enumerated() {
             let cleaned = Self.cleaned(segment.text)
-            guard !cleaned.isEmpty else { return nil }
+            guard !cleaned.isEmpty else { continue }
+            let segStart = Double(segment.start)
+            let segEnd = Double(segment.end)
             // Lines Whisper wrote over a stretch with no voice are invented.
-            if let timeline, !Self.hasVoice(timeline, from: Double(segment.start), to: Double(segment.end)) {
-                return nil
+            if let timeline, !Self.hasVoice(timeline, from: segStart, to: segEnd) {
+                continue
             }
             // Same glossary-prompt echo handling as the live loop.
             guard let text = glossaryActive
-                ? Self.strippingGlossaryEcho(cleaned) : cleaned else { return nil }
-            return TranscriptionResult(
+                ? Self.strippingGlossaryEcho(cleaned) : cleaned else { continue }
+            lines.append(TranscriptionResult(
                 text: text,
                 source: .them,
-                startTime: Double(segment.start),
-                endTime: Double(segment.end),
+                startTime: segStart,
+                endTime: segEnd,
                 confidence: segment.avgLogprob
-            )
+            ))
+            segItems.append(TranscriptionLogEntry.SegmentItem(
+                index: idx,
+                relStart: segStart,
+                relEnd: segEnd,
+                absStart: segStart,
+                absEnd: segEnd,
+                rawText: segment.text,
+                cleanedText: text
+            ))
         }
+
+        let rtf = totalSeconds / max(Double(elapsedMs) / 1000.0, 0.001)
+        let structured: [String: Any] = [
+            "request": [
+                "model": currentModel,
+                "displayModel": modelLabel,
+                "language": language ?? "auto",
+                "track": trackLabel,
+                "durationSec": ((totalSeconds * 1000).rounded() / 1000),
+                "samples": samples.count
+            ],
+            "response": [
+                "elapsedMs": elapsedMs,
+                "realtimeFactor": ((rtf * 10).rounded() / 10),
+                "acceptedSegments": lines.count,
+                "segments": segItems.map { [
+                    "index": $0.index,
+                    "start": $0.absStart,
+                    "end": $0.absEnd,
+                    "text": $0.rawText
+                ] }
+            ]
+        ]
+        let jsonStr = (try? JSONSerialization.data(withJSONObject: structured, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
+
+        onTrace?(TranscriptionLogEntry(
+            kind: .modelResponse,
+            modelName: modelLabel,
+            trackLabel: trackLabel,
+            intervalStart: 0,
+            intervalEnd: totalSeconds,
+            sampleCount: samples.count,
+            elapsedMs: elapsedMs,
+            summary: "\(lines.count) segment(s) in \(String(format: "%.2fs", Double(elapsedMs)/1000.0)) (\(String(format: "%.1fx", rtf)) realtime)",
+            rawText: results.flatMap(\.segments).map(\.text).joined(separator: " "),
+            segments: segItems,
+            structuredJSON: jsonStr
+        ))
+
+        return lines
     }
 
     /// Parakeet's share of imports. nil = this file goes to Whisper: a pinned
@@ -1756,9 +1983,12 @@ final class TranscriptionEngine {
     private func parakeetImport(
         url: URL,
         samples providedSamples: [Float]? = nil,
+        timeline providedTimeline: [Float]? = nil,
+        trackLabel: String = "Audio",
         totalSeconds providedTotalSeconds: Double? = nil,
         parakeet: ParakeetTranscriber,
-        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil
+        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil,
+        onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil
     ) async throws -> [TranscriptionResult]? {
         let pinned = TranscriptionLanguage.selected
         if let pinned, !LanguageRouter.parakeetLanguages.contains(pinned) { return nil }
@@ -1780,21 +2010,93 @@ final class TranscriptionEngine {
             let heard = Set(verdicts.compactMap(\.language))
             hint = heard.count == 1 ? heard.first : nil
         }
-        let timeline = await speechTimeline(samples: samples)
+        let modelLabel = TranscriptionJobProgress.displayModelName(modelID: "parakeet-v3", backend: .local, language: hint)
+        let timeline: [Float]?
+        if let providedTimeline {
+            timeline = providedTimeline
+        } else {
+            timeline = await speechTimeline(samples: samples, url: url)
+        }
         var lines: [TranscriptionResult] = []
         for piece in Self.utterances(in: samples) {
             try Task.checkCancellation()
             let start = Double(piece.start) / 16000, end = Double(piece.start + piece.audio.count) / 16000
             // Lines over a stretch with no voice would be invented.
             if let timeline, !Self.hasVoice(timeline, from: start, to: end) {
+                onTrace?(TranscriptionLogEntry(
+                    kind: .intervalSkip,
+                    modelName: modelLabel,
+                    trackLabel: trackLabel,
+                    intervalStart: start,
+                    intervalEnd: end,
+                    sampleCount: piece.audio.count,
+                    summary: "Skipped silent interval \(TranscriptionJobProgress.formatTimestamp(start)) → \(TranscriptionJobProgress.formatTimestamp(end)) (no voice in VAD)"
+                ))
                 onProgress?(end, totalSeconds)
                 continue
             }
-            let text = Self.cleaned(try await parakeet.transcribe(Self.normalizedForDecode(piece.audio), language: hint))
+            onTrace?(TranscriptionLogEntry(
+                kind: .intervalSent,
+                modelName: modelLabel,
+                trackLabel: trackLabel,
+                intervalStart: start,
+                intervalEnd: end,
+                sampleCount: piece.audio.count,
+                summary: "Sent \(TranscriptionJobProgress.formatTimestamp(start)) → \(TranscriptionJobProgress.formatTimestamp(end)) (\(String(format: "%.1f", end - start))s) to \(modelLabel)"
+            ))
+            let t0 = Date()
+            let rawResult = try await parakeet.transcribe(Self.normalizedForDecode(piece.audio), language: hint)
+            let elapsedMs = max(1, Int(Date().timeIntervalSince(t0) * 1000))
+            let text = Self.cleaned(rawResult)
+            let rtf = (end - start) / max(Double(elapsedMs) / 1000.0, 0.001)
+
+            var segItems: [TranscriptionLogEntry.SegmentItem] = []
             if !text.isEmpty {
-                // One mixed track, so every line is "Them"; diarization splits it later.
                 lines.append(TranscriptionResult(text: text, source: .them, startTime: start, endTime: end, confidence: nil))
+                segItems.append(TranscriptionLogEntry.SegmentItem(
+                    index: 0,
+                    relStart: 0,
+                    relEnd: end - start,
+                    absStart: start,
+                    absEnd: end,
+                    rawText: rawResult,
+                    cleanedText: text
+                ))
             }
+
+            let structured: [String: Any] = [
+                "request": [
+                    "model": "parakeet-v3",
+                    "displayModel": modelLabel,
+                    "language": hint ?? "auto",
+                    "track": trackLabel,
+                    "intervalSec": [((start * 1000).rounded() / 1000), ((end * 1000).rounded() / 1000)],
+                    "durationSec": (((end - start) * 1000).rounded() / 1000),
+                    "samples": piece.audio.count
+                ],
+                "response": [
+                    "elapsedMs": elapsedMs,
+                    "realtimeFactor": ((rtf * 10).rounded() / 10),
+                    "rawText": rawResult,
+                    "accepted": !text.isEmpty
+                ]
+            ]
+            let jsonStr = (try? JSONSerialization.data(withJSONObject: structured, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
+
+            onTrace?(TranscriptionLogEntry(
+                kind: .modelResponse,
+                modelName: modelLabel,
+                trackLabel: trackLabel,
+                intervalStart: start,
+                intervalEnd: end,
+                sampleCount: piece.audio.count,
+                elapsedMs: elapsedMs,
+                summary: text.isEmpty ? "No speech decoded in \(elapsedMs)ms" : "Decoded in \(String(format: "%.2fs", Double(elapsedMs)/1000.0)) (\(String(format: "%.1fx", rtf)) realtime)",
+                rawText: rawResult,
+                segments: segItems,
+                structuredJSON: jsonStr
+            ))
+
             onProgress?(end, totalSeconds)
         }
         onProgress?(totalSeconds, totalSeconds)
