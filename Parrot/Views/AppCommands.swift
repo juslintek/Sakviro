@@ -253,6 +253,12 @@ struct ParrotCommands: Commands {
                 FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
             }
             .keyboardShortcut("w", modifiers: [.option, .command])
+            .help("Toggle floating assistant (⌥⌘W, global ⌃⌥W)")
+
+            Toggle("Auto-open Assistant on Calls", isOn: Binding(
+                get: { UserDefaults.standard.object(forKey: "floatingWidgetAutoShow") as? Bool ?? true },
+                set: { UserDefaults.standard.set($0, forKey: "floatingWidgetAutoShow") }
+            ))
         }
 
         // Help: the bundled Apple Help Book (searchable, offline), plus the

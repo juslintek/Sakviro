@@ -26,7 +26,7 @@ enum CopilotProviderKind: String, CaseIterable, Identifiable {
         case .custom: "Other AI service"
         case .claudeCode: "Claude Code CLI"
         case .codex: "Codex CLI"
-        case .gemini: "Gemini CLI"
+        case .gemini: "Antigravity / Gemini CLI"
         case .copilot: "GitHub Copilot CLI"
         case .customCLI: "Custom CLI"
         }
@@ -522,7 +522,14 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
         CloudGate.forcesLocal ? .ollama : (AssistantRoutingSettings.configuredKinds().first ?? .ollama)
     }
     static var reportsKind: CopilotProviderKind { liveKind }
-    static var askKind: CopilotProviderKind { liveKind }
+    static var askKind: CopilotProviderKind { askPinnedKind ?? liveKind }
+
+    static var askPinnedKind: CopilotProviderKind? {
+        guard let raw = UserDefaults.standard.string(forKey: AssistantRoutingSettings.askPinnedKey), !raw.isEmpty,
+              let kind = CopilotProviderKind(rawValue: raw),
+              AssistantRoutingSettings.enabled(kind) else { return nil }
+        return kind
+    }
 
     static func askLabel(kind: CopilotProviderKind, model: String) -> String {
         switch kind {
@@ -609,13 +616,26 @@ final class SwitchingAnalysisProvider: AnalysisProvider {
     var reportsRunLocally: Bool { CloudGate.forcesLocal || AssistantRoutingSettings.routesLocally() }
     var reportsConfigured: Bool { isConfigured }
     func completeAsk(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
-        try await complete(system: system, user: user, maxTokens: maxTokens, context: context)
+        if CloudGate.forcesLocal {
+            return try await localCompat.complete(system: system, user: user, maxTokens: maxTokens, context: context)
+        }
+        var redactor = reportsRedactor
+        let preferred = Self.askPinnedKind
+        let answer = try await automatic.complete(system: system, user: redactor?.redact(user) ?? user,
+                                                  maxTokens: maxTokens, context: context, preferredKind: preferred)
+        return redactor?.restore(answer) ?? answer
     }
     var askRunsLocally: Bool { reportsRunLocally }
     var askUsesOllama: Bool { reportsRunLocally }
     var askConfigured: Bool { isConfigured }
     var askModelLabel: String {
         if CloudGate.forcesLocal { return Self.askLabel(kind: .ollama, model: localCompat.usageModel ?? CopilotProviderKind.modelName(for: .ollama)) }
+        if let pinned = Self.askPinnedKind {
+            let model = (automatic.provider(for: pinned) as? CLIAnalysisProvider)?.usageModel
+                ?? (automatic.provider(for: pinned) as? OpenAICompatibleProvider)?.usageModel
+                ?? CopilotProviderKind.modelName(for: pinned)
+            return "\(model) · \(pinned.label)"
+        }
         return automatic.usageModel.map { "\($0) · automatic routing" } ?? "Automatic · enabled integrations"
     }
     var liveUsage: (model: String, provider: String, totals: AITokenTotals) {

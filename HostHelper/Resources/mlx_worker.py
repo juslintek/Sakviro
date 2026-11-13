@@ -72,7 +72,17 @@ def handle(request):
             audio = _np.asarray(audio, dtype=_np.float32)
         result = transcribe(audio, path_or_hf_repo=path,
                             language=language, verbose=None, fp16=True)
-    return {"ok": True, "text": result["text"]}
+    raw_segments = result.get("segments") or []
+    segments = [
+        {
+            "start": float(s.get("start", 0.0)),
+            "end": float(s.get("end", 0.0)),
+            "text": str(s.get("text", "")).strip(),
+        }
+        for s in raw_segments
+        if str(s.get("text", "")).strip()
+    ]
+    return {"ok": True, "text": result["text"], "segments": segments}
 
 
 for line in sys.stdin:

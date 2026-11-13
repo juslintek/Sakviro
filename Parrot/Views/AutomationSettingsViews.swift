@@ -45,7 +45,9 @@ struct LoginItemRow: View {
 /// Off / Ask me / Record automatically, plus the apps the user told us to
 /// leave alone.
 struct CallDetectionCard: View {
+    @Environment(RecordingManager.self) private var recordingManager
     @AppStorage(AutoRecordMode.defaultsKey) private var modeRaw = AutoRecordMode.ask.rawValue
+    @AppStorage("floatingWidgetAutoShow") private var floatingWidgetAutoShow = true
     @State private var ignored: [String] = CallWatcher.ignoredApps.sorted()
     @AppStorage(CalendarService.remindersKey) private var reminders = false
     @State private var notifications: NotificationAccess.State = .on
@@ -65,6 +67,21 @@ struct CallDetectionCard: View {
             }
             SettingsRow {
                 Hint(detail)
+            }
+            SettingsToggleRow(
+                title: "Auto-open Assistant on calls",
+                detail: "Show the floating notes and questions assistant overlay when a call recording starts.",
+                isOn: $floatingWidgetAutoShow
+            )
+            if !recordingManager.calendar.isConnected {
+                SettingsLabeledRow(
+                    title: "Calendar is disconnected",
+                    detail: "Connect Calendar to detect scheduled meetings (Google Meet, Zoom, Teams) even before mic activity."
+                ) {
+                    Button("Connect Calendar to detect scheduled meetings") {
+                        Task { await recordingManager.calendar.connect() }
+                    }
+                }
             }
             if NotificationAccess.needsWarning(notifications, mode: AutoRecordMode(rawValue: modeRaw) ?? .ask,
                                                reminders: reminders) {

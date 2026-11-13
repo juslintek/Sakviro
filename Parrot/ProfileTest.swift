@@ -37,6 +37,7 @@ enum ProfileTest {
         testSpeechModels()
         testCLIResponses()
         testAssistantRouting()
+        testStabilization()
         testPermissionFlow()
         testMicWatchdog()
         testCaptureClock()
@@ -4659,7 +4660,7 @@ enum ProfileTest {
         let tmp = fm.temporaryDirectory.appendingPathComponent("parrot-bundle-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: tmp) }
         let manifest = MCPBundle.manifest(version: "1.2.3")
-        check("mcpb: name and version", manifest["name"] as? String == "parrot" && manifest["version"] as? String == "1.2.3"
+        check("mcpb: name and version", manifest["name"] as? String == MCPBundle.mcpName && manifest["version"] as? String == "1.2.3"
               && manifest["display_name"] as? String == MeetingActions.appName && manifest["icon"] as? String == "icon.png")
         check("mcpb: every tool listed", (manifest["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
               == MCPServer.tools.compactMap { $0["name"] as? String })
@@ -4763,17 +4764,17 @@ enum ProfileTest {
 
         let path = "/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot"
         check("connect: Claude Code command", MCPBundle.claudeCodeCommand(executable: path)
-              == "claude mcp add --scope user parrot -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
+              == "claude mcp add --scope user \(MCPBundle.mcpName) -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
         check("connect: Codex command", MCPBundle.codexCommand(executable: path)
-              == "codex mcp add parrot -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
+              == "codex mcp add \(MCPBundle.mcpName) -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
         check("connect: Codex command uses the tool inside ChatGPT", MCPBundle.codexCommand(executable: path,
               codexCLI: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
-              == "'/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex' mcp add parrot -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
+              == "'/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex' mcp add \(MCPBundle.mcpName) -- '/Users/me/My Apps/Parrot.app/Contents/MacOS/Parrot' --mcp")
         let link = MCPBundle.cursorLink(executable: path)
         let config = link.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "config" }?.value }
             .flatMap { Data(base64Encoded: $0) }
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        check("connect: Cursor link carries the command", link?.absoluteString.hasPrefix("cursor://anysphere.cursor-deeplink/mcp/install?name=parrot&config=") == true
+        check("connect: Cursor link carries the command", link?.absoluteString.hasPrefix("cursor://anysphere.cursor-deeplink/mcp/install?name=\(MCPBundle.mcpName)&config=") == true
               && config?["command"] as? String == path && config?["args"] as? [String] == ["--mcp"])
     }
 

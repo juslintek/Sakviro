@@ -9,6 +9,7 @@ enum MCPBundle {
 
     static let bundleID = "com.uygar.parrot"
     static let appBundleID = "com.linas.parrot.assistant"
+    static var mcpName: String { MeetingActions.isFork ? "sakviro" : "parrot" }
     static let claudeBundleID = "com.anthropic.claudefordesktop"
     static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
     /// Codex now ships inside the ChatGPT app, which carries this id.
@@ -25,13 +26,13 @@ enum MCPBundle {
 
     /// For every project, not just the folder it's pasted in.
     static func claudeCodeCommand(executable: String) -> String {
-        "claude mcp add --scope user parrot -- \(shellQuoted(executable)) --mcp"
+        "claude mcp add --scope user \(mcpName) -- \(shellQuoted(executable)) --mcp"
     }
 
     /// `codexCLI`: the codex tool inside the ChatGPT app, when found. Most
     /// people never put `codex` on their PATH, so a bare "codex" would fail.
     static func codexCommand(executable: String, codexCLI: String? = nil) -> String {
-        "\(codexCLI.map(shellQuoted) ?? "codex") mcp add parrot -- \(shellQuoted(executable)) --mcp"
+        "\(codexCLI.map(shellQuoted) ?? "codex") mcp add \(mcpName) -- \(shellQuoted(executable)) --mcp"
     }
 
     /// The codex tool inside the installed ChatGPT app, if it's there.
@@ -48,7 +49,7 @@ enum MCPBundle {
         guard let json = try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys, .withoutEscapingSlashes]),
               let encoded = json.base64EncodedString().addingPercentEncoding(withAllowedCharacters: .alphanumerics)
         else { return nil }
-        return URL(string: "cursor://anysphere.cursor-deeplink/mcp/install?name=parrot&config=\(encoded)")
+        return URL(string: "cursor://anysphere.cursor-deeplink/mcp/install?name=\(mcpName)&config=\(encoded)")
     }
 
     // MARK: The Claude Desktop install file
@@ -99,7 +100,7 @@ enum MCPBundle {
     static func manifest(version: String) -> [String: Any] {
         [
             "manifest_version": "0.3",
-            "name": "parrot",
+            "name": mcpName,
             "display_name": MeetingActions.appName,
             "version": version,
             "description": "Your recorded meetings in Claude: search them, catch up, list promises, draft follow-ups. Local and read-only.",

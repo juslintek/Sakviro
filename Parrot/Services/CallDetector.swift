@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import CoreGraphics
 
 /// Notices calls starting and ending in other apps, so Parrot can offer to
 /// record without the user remembering to press a button.
@@ -206,29 +207,42 @@ struct CallDetector {
         return id
     }
 
-    static let meetingAppPrefixes: [String] = [
+    static let dedicatedCallAppPrefixes: [String] = [
         "us.zoom",
         "com.microsoft.teams",
         "com.apple.FaceTime",
+        "Cisco-Systems.Spark",
+        "com.cisco.webexmeetingsapp",
+        "com.skype",
+        "com.loom.desktop",
         "com.tinyspeck.slackmacgap",
+        "com.hnc.Discord",
+        "net.whatsapp.WhatsApp",
+        "desktop.WhatsApp",
+        "ru.keepcoder.Telegram",
+    ]
+
+    static let browserAppPrefixes: [String] = [
         "com.google.Chrome",
         "com.apple.Safari",
         "company.thebrowser",
         "com.microsoft.edgemac",
         "org.mozilla.firefox",
         "com.brave.Browser",
-        "com.hnc.Discord",
-        "Cisco-Systems.Spark",
-        "com.cisco.webexmeetingsapp",
-        "com.skype",
-        "net.whatsapp.WhatsApp",
-        "desktop.WhatsApp",
-        "ru.keepcoder.Telegram",
-        "com.loom.desktop",
     ]
+
+    static let meetingAppPrefixes: [String] = dedicatedCallAppPrefixes + browserAppPrefixes
 
     static func isKnownMeetingApp(_ appID: String) -> Bool {
         meetingAppPrefixes.contains { appID == $0 || appID.hasPrefix($0) }
+    }
+
+    static func isDedicatedCallApp(_ bundleID: String) -> Bool {
+        dedicatedCallAppPrefixes.contains { bundleID == $0 || bundleID.hasPrefix($0) }
+    }
+
+    static func isBrowserApp(_ bundleID: String) -> Bool {
+        browserAppPrefixes.contains { bundleID == $0 || bundleID.hasPrefix($0) }
     }
 
     /// A friendly name for prompts ("Zoom", "Chrome").
@@ -307,3 +321,67 @@ struct CallDetector {
         return nil
     }
 }
+
+// MARK: - Browser call inspection
+
+extension CallDetector {
+    /// Detects browser-based video/audio calls by checking window and tab titles.
+    enum BrowserCallInspector {
+        /// Pure testable check for browser window/tab titles indicating an active video or audio call.
+        static func isMeetingWindowTitle(_ title: String) -> Bool {
+            let lower = title.lowercased()
+            let patterns = [
+                "google meet",
+                "meet - ",
+                "zoom",
+                "microsoft teams",
+                "teams |",
+                "| microsoft teams",
+                "webex",
+                "slack - huddle",
+                "huddle",
+                "discord",
+                "whereby",
+                "jitsi",
+                "around",
+                "riverside",
+                "chime",
+            ]
+            return patterns.contains { lower.contains($0) }
+        }
+
+        /// Queries on-screen windows for running instances of `bundleID` to check if any window
+        /// matches a known meeting window/tab title. Returns false safely if permissions do not allow
+        /// window titles to be read or if no meeting window is found.
+        static func hasActiveMeetingWindow(for bundleID: String) -> Bool {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            let pids: Set<pid_t>
+            if !apps.isEmpty {
+                pids = Set(apps.map(\.processIdentifier))
+            } else {
+                pids = Set(NSWorkspace.shared.runningApplications.filter { app in
+                    guard let id = app.bundleIdentifier else { return false }
+                    return id == bundleID || id.hasPrefix(bundleID)
+                }.map(\.processIdentifier))
+            }
+            guard !pids.isEmpty else { return false }
+
+            guard let windowInfoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+                return false
+            }
+
+            for window in windowInfoList {
+                guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                      pids.contains(ownerPID) else { continue }
+                if let title = window[kCGWindowName as String] as? String, !title.isEmpty {
+                    if isMeetingWindowTitle(title) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+    }
+}
+
+typealias BrowserCallInspector = CallDetector.BrowserCallInspector

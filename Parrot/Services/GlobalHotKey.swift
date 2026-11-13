@@ -27,6 +27,11 @@ final class GlobalHotKey {
             modifiers: UInt32(controlKey | optionKey | shiftKey),
             display: "⌃⌥⇧M"
         )
+        static let toggleFloatingWidget = Combo(
+            keyCode: UInt32(kVK_ANSI_W),
+            modifiers: UInt32(controlKey | optionKey),
+            display: "⌃⌥W"
+        )
     }
 
     private var hotKeyRef: EventHotKeyRef?

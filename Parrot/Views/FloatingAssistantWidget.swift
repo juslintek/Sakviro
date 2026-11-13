@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+/// Floating panel that allows key window status without activating the full application.
+/// Internal so unit tests can assert canBecomeKey == true and canBecomeMain == false.
+final class KeyableFloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 /// Always-on-top floating widget for live Questions, Notes, and AI Lookups.
 /// Excluded from screen capture (`sharingType = .none`) so screen shares
 /// in Zoom, Teams, or Google Meet never show it.
@@ -31,6 +38,54 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
 
     private var panel: NSPanel?
     private weak var recordingManager: RecordingManager?
+    weak var appSession: AppSession?
+    private let hotKey = GlobalHotKey()
+
+    var currentPanel: NSPanel? { panel }
+
+    @discardableResult
+    func ensurePanel(recordingManager: RecordingManager) -> NSPanel {
+        if let panel { return panel }
+        let p = makePanel(recordingManager: recordingManager)
+        self.panel = p
+        return p
+    }
+
+    func configure(recordingManager: RecordingManager, appSession: AppSession) {
+        self.recordingManager = recordingManager
+        self.appSession = appSession
+        registerGlobalHotKey(manager: recordingManager)
+    }
+
+    func registerGlobalHotKey(manager: RecordingManager) {
+        hotKey.register(.toggleFloatingWidget) { [weak self] in
+            self?.toggle(recordingManager: manager)
+        }
+    }
+
+    func targetMeeting(in manager: RecordingManager) -> Meeting? {
+        if let live = manager.currentMeeting { return live }
+        return appSession?.selectedMeeting
+    }
+
+    func onRecordingStarted(meeting: Meeting, manager: RecordingManager) {
+        self.recordingManager = manager
+        let trimmedDraft = draftNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDraft.isEmpty {
+            let existing = meeting.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            if existing.isEmpty {
+                meeting.notes = trimmedDraft
+            } else {
+                meeting.notes = trimmedDraft + "\n\n" + meeting.notes
+            }
+            try? manager.modelContext?.save()
+            draftNotes = ""
+        }
+        let autoShow = UserDefaults.standard.object(forKey: "floatingWidgetAutoShow") as? Bool ?? true
+        if autoShow {
+            show(recordingManager: manager)
+        }
+    }
 
     func toggle(recordingManager: RecordingManager) {
         if isVisible {
@@ -45,6 +100,7 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
         let panel = self.panel ?? makePanel(recordingManager: recordingManager)
         self.panel = panel
         panel.orderFrontRegardless()
+        panel.makeKeyAndOrderFront(nil)
         isVisible = true
     }
 
@@ -58,7 +114,7 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
     }
 
     private func makePanel(recordingManager: RecordingManager) -> NSPanel {
-        let panel = NSPanel(
+        let panel = KeyableFloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
             styleMask: [.nonactivatingPanel, .titled, .closable, .resizable, .utilityWindow, .fullSizeContentView],
             backing: .buffered,
@@ -96,9 +152,10 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
         questionsError = nil
         defer { isPreparingQuestions = false }
 
-        let transcript = recentTranscript(from: manager, limit: 4500)
-        let notes = manager.currentMeeting?.notes ?? draftNotes
-        let meetingTitle = manager.currentMeeting?.title ?? ""
+        let target = targetMeeting(in: manager)
+        let transcript = recentTranscript(from: manager, meeting: target, limit: 4500)
+        let notes = target?.notes ?? draftNotes
+        let meetingTitle = target?.title ?? (manager.callWatcher.nextCall?.event.title ?? "")
         let query = [meetingTitle, String(transcript.suffix(600))].filter { !$0.isEmpty }.joined(separator: "\n")
         let refs = await manager.knowledgeBase.search(
             query: query.isEmpty ? "project questions context" : query,
@@ -141,7 +198,8 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
         lookupError = nil
         defer { isLookingUp = false }
 
-        let transcript = recentTranscript(from: manager, limit: 3500)
+        let target = targetMeeting(in: manager)
+        let transcript = recentTranscript(from: manager, meeting: target, limit: 3500)
         let refs = await manager.knowledgeBase.search(
             query: query,
             profileID: manager.callAnalysisEngine.activeProfile?.id,
@@ -167,12 +225,12 @@ final class FloatingAssistantWidgetController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func recentTranscript(from manager: RecordingManager, limit: Int) -> String {
-        guard let meeting = manager.currentMeeting else { return "" }
-        let names = meeting.speakerNames
-        let text = meeting.sortedSegments
+    private func recentTranscript(from manager: RecordingManager, meeting: Meeting?, limit: Int) -> String {
+        guard let m = meeting ?? manager.currentMeeting else { return "" }
+        let names = m.speakerNames
+        let text = m.sortedSegments
             .suffix(25)
-            .map { "[\(meeting.displayName(forSpeaker: $0.speakerLabel, names: names))] \($0.text)" }
+            .map { "[\(m.displayName(forSpeaker: $0.speakerLabel, names: names))] \($0.text)" }
             .joined(separator: "\n")
         if text.count <= limit { return text }
         return String(text.suffix(limit))
@@ -200,6 +258,15 @@ struct FloatingAssistantWidgetView: View {
                     Circle()
                         .fill(.red)
                         .frame(width: 7, height: 7)
+                } else if let target = controller.targetMeeting(in: recordingManager) {
+                    Text(target.title.isEmpty ? "Meeting" : target.title)
+                        .font(.appCaption)
+                        .foregroundStyle(Theme.Colors.ink2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.Colors.panel, in: Capsule())
                 }
                 Spacer()
                 Picker("", selection: $controller.activeTab) {
@@ -213,6 +280,33 @@ struct FloatingAssistantWidgetView: View {
             .padding(.horizontal, 12)
             .padding(.top, 28)
             .padding(.bottom, 8)
+
+            if !recordingManager.isRecording, let upcoming = recordingManager.callWatcher.nextCall {
+                HStack(spacing: 8) {
+                    Image(systemName: "calendar")
+                        .font(.caption)
+                        .foregroundStyle(Theme.Colors.accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(upcoming.event.title.isEmpty ? "Upcoming Meeting" : upcoming.event.title)
+                            .font(.appCaption)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                        Text(upcoming.event.start.formatted(date: .omitted, time: .shortened))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.Colors.ink2)
+                    }
+                    Spacer()
+                    Button("Prep") {
+                        controller.activeTab = .questions
+                        Task { await controller.prepareQuestions(using: recordingManager) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.Colors.panel.opacity(0.85))
+            }
 
             Divider()
 
@@ -297,7 +391,7 @@ struct FloatingAssistantWidgetView: View {
 
     private var notesTab: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(recordingManager.currentMeeting != nil ? "Live meeting notes (auto-saved)" : "Scratch notes")
+            Text(notesHeaderTitle)
                 .font(.appCaption)
                 .foregroundStyle(Theme.Colors.ink2)
             TextEditor(text: notesBinding)
@@ -309,8 +403,19 @@ struct FloatingAssistantWidgetView: View {
         .padding(12)
     }
 
+    private var notesHeaderTitle: String {
+        if recordingManager.currentMeeting != nil {
+            return "Live meeting notes (auto-saved)"
+        }
+        if let target = controller.targetMeeting(in: recordingManager) {
+            let title = target.title.isEmpty ? "Selected meeting" : target.title
+            return "Notes: \(title)"
+        }
+        return "Scratch notes"
+    }
+
     private var notesBinding: Binding<String> {
-        if let meeting = recordingManager.currentMeeting {
+        if let meeting = controller.targetMeeting(in: recordingManager) {
             return Binding(
                 get: { meeting.notes },
                 set: { meeting.notes = $0 }

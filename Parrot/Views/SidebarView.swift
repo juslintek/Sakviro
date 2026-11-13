@@ -204,6 +204,7 @@ private struct NavRow: View {
 struct MeetingRow: View {
     let meeting: Meeting
     let selected: Bool
+    @Environment(RecordingManager.self) private var recordingManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -235,7 +236,14 @@ struct MeetingRow: View {
                     .foregroundStyle(Theme.Colors.stop)
             }
         case .processing:
-            ProgressView().controlSize(.mini).frame(width: 10, height: 10)
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini).frame(width: 10, height: 10)
+                if let job = recordingManager.transcriptionJobs[meeting.id] {
+                    Text("\(Int((min(max(job.fraction, 0), 1) * 100).rounded()))%")
+                        .font(Theme.Typography.mono(10))
+                        .foregroundStyle(Theme.Colors.ink2)
+                }
+            }
         default:
             Text(meeting.date, style: .time)
                 .font(Theme.Typography.mono(11))
@@ -367,7 +375,7 @@ private struct AccountChip: View {
                     .lineLimit(1)
                 // Version up front so "which build am I running?" never needs
                 // a trip to the About panel.
-                Text("v\(AppUpdater.currentVersion) · On-device · Private")
+                Text("v\(AppUpdater.currentVersion) · \((CloudGate.forcesLocal || AssistantRoutingSettings.routesLocally()) ? "On-device · Private" : "Connected AI · Local audio")")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.ink2)
             }

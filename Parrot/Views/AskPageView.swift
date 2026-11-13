@@ -9,6 +9,7 @@ struct AskPageView: View {
     @Environment(\.openSettings) private var openSettings
     @Query private var meetings: [Meeting]
     @AppStorage(AssistantRoutingSettings.enabledKey) private var enabledIntegrations = ""
+    @AppStorage(AssistantRoutingSettings.askPinnedKey) private var askPinnedIntegration = ""
 
     @State private var selectedID: UUID?
     /// A new chat that has no messages yet (not saved until the first one).
@@ -201,10 +202,36 @@ struct AskPageView: View {
 
     private var aiMenu: some View {
         Menu {
-            Text("Automatically uses an enabled connection that supports the request.")
-            Button("AI Settings…") { SettingsView.open(.copilot, with: openSettings) }
+            Button {
+                askPinnedIntegration = ""
+            } label: {
+                HStack {
+                    Text("Automatic routing")
+                    if askPinnedIntegration.isEmpty {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            let configured = AssistantRoutingSettings.configuredKinds()
+            if !configured.isEmpty {
+                Divider()
+                ForEach(configured) { kind in
+                    Button {
+                        askPinnedIntegration = kind.rawValue
+                    } label: {
+                        HStack {
+                            Text(kind.label)
+                            if askPinnedIntegration == kind.rawValue {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Assistant Settings…") { SettingsView.open(.copilot, with: openSettings) }
         } label: {
-            Label(label(for: enabledIntegrations), systemImage: "sparkles")
+            Label(label(for: "\(enabledIntegrations)|\(askPinnedIntegration)"), systemImage: "sparkles")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

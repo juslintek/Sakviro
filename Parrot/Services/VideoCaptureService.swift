@@ -301,7 +301,8 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
                 input.markAsFinished()
                 writer.finishWriting {
                     if writer.status == .completed {
-                        let offset = max(0, CMTimeGetSeconds(first) - self.audioOrigin)
+                        let rawOffset = self.audioOrigin > 0 ? (CMTimeGetSeconds(first) - self.audioOrigin) : 0
+                        let offset = rawOffset.isFinite ? rawOffset : 0
                         if let failure = self.failure {
                             continuation.resume(throwing: VideoError.partial(url, offset, failure.localizedDescription))
                         } else {
@@ -341,14 +342,16 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         guard let source = try await videoAsset.loadTracks(withMediaType: .video).first,
               let target = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { throw VideoError.noFrames }
         let duration = try await videoAsset.load(.duration)
-        try target.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: source,
-                                   at: CMTime(seconds: offset, preferredTimescale: 600))
+        let videoStartTime = offset >= 0 ? CMTime(seconds: offset, preferredTimescale: 600) : .zero
+        let audioStartTime = offset < 0 ? CMTime(seconds: -offset, preferredTimescale: 600) : .zero
+
+        try target.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: source, at: videoStartTime)
         for url in audio where FileManager.default.fileExists(atPath: url.path) {
             let asset = AVURLAsset(url: url)
             guard let source = try await asset.loadTracks(withMediaType: .audio).first,
                   let target = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
             let length = try await asset.load(.duration)
-            try target.insertTimeRange(CMTimeRange(start: .zero, duration: length), of: source, at: .zero)
+            try target.insertTimeRange(CMTimeRange(start: .zero, duration: length), of: source, at: audioStartTime)
         }
         let audioTracks = composition.tracks(withMediaType: .audio)
         guard !audioTracks.isEmpty else { throw VideoError.noAudio }
@@ -362,8 +365,16 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         export.audioMix = mix
         export.outputURL = destination
         export.outputFileType = .mp4
-        await export.export()
-        guard export.status == .completed else { throw export.error ?? VideoError.writer }
+        do {
+            await export.export()
+            guard export.status == .completed else {
+                try? FileManager.default.removeItem(at: destination)
+                throw export.error ?? VideoError.writer
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
     }
 
     private static func fastMux(

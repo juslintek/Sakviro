@@ -80,6 +80,19 @@ struct MeetingDetailView: View {
             meetingHeader
                 .layoutPriority(1)
 
+            if let job = recordingManager.transcriptionJobs[meeting.id] {
+                transcriptionProgressBanner(job)
+            }
+
+            if let err = recordingManager.transcriptionErrors[meeting.id] {
+                transcriptionErrorBanner(err)
+            }
+
+            if recordingManager.completedRetranscribeIDs.contains(meeting.id),
+               recordingManager.transcriptionJobs[meeting.id] == nil {
+                retranscribeSuccessBanner
+            }
+
             if meeting.wasRecovered { recoveredBanner }
 
             Divider()
@@ -188,16 +201,13 @@ struct MeetingDetailView: View {
                 AskClaudeMenu(meeting: meeting)
 
                 Button {
-                    runAction {
-                        let count = try await recordingManager.retranscribe(meeting)
-                        tab = .transcript
-                        return "Re-transcribed (\(count) segments)."
-                    }
+                    tab = .transcript
+                    recordingManager.startRetranscribe(meeting)
                 } label: {
                     Label("Re-transcribe", systemImage: "waveform")
                 }
                 .help("Re-run transcription on the saved audio using your current speech model")
-                .disabled(actionRunning || recordingManager.isRecording || (meeting.systemAudioPath.nilIfEmpty == nil && meeting.micAudioPath?.nilIfEmpty == nil))
+                .disabled(recordingManager.isRecording || recordingManager.transcriptionJobs[meeting.id] != nil || recordingManager.isBusy(meeting.id) || (meeting.systemAudioPath.nilIfEmpty == nil && meeting.micAudioPath?.nilIfEmpty == nil))
 
                 Button { showRewrite = true } label: {
                     Label("Rewrite Report…", systemImage: "arrow.triangle.2.circlepath")
@@ -395,7 +405,7 @@ struct MeetingDetailView: View {
                         }
                     }
                 }
-                if meeting.videoError != nil, meeting.rawVideoPath != nil {
+                if (meeting.videoError != nil || meeting.videoWarning != nil), meeting.rawVideoPath != nil {
                     Button(videoMuxing ? "Preparing…" : "Retry video with audio") {
                         videoMuxing = true
                         Task {
@@ -560,6 +570,89 @@ struct MeetingDetailView: View {
         }
         .padding(16)
         .frame(width: 320)
+    }
+
+    private func transcriptionProgressBanner(_ job: TranscriptionJobProgress) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(job.statusText)
+                    .font(Theme.Typography.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Colors.ink)
+                Spacer(minLength: 4)
+                if let eta = job.estimatedRemaining(), eta > 0 {
+                    let seconds = Int(eta)
+                    Text(seconds >= 60 ? "~\(seconds / 60)m \(seconds % 60)s left" : "~\(seconds)s left")
+                        .font(Theme.Typography.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.Colors.ink2)
+                }
+                Button("Cancel") {
+                    recordingManager.cancelTranscriptionJob(for: meeting.id)
+                }
+                .buttonStyle(.plain)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.stop)
+            }
+            ProgressView(value: min(max(job.fraction, 0), 1))
+                .progressViewStyle(.linear)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.Colors.chip, in: RoundedRectangle(cornerRadius: Theme.Metrics.radius))
+        .padding(.horizontal, Theme.Metrics.pad)
+        .padding(.bottom, 8)
+    }
+
+    private func transcriptionErrorBanner(_ error: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(Theme.Colors.warn)
+            Text(error)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.ink)
+            Spacer(minLength: 0)
+            Button("Dismiss") {
+                recordingManager.transcriptionErrors.removeValue(forKey: meeting.id)
+            }
+            .buttonStyle(.plain)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.Colors.ink2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.Colors.chip, in: RoundedRectangle(cornerRadius: Theme.Metrics.radius))
+        .padding(.horizontal, Theme.Metrics.pad)
+        .padding(.bottom, 8)
+    }
+
+    private var retranscribeSuccessBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(Theme.Colors.good)
+            Text("Transcript updated.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.ink)
+            Spacer(minLength: 0)
+            Button("Rewrite Report") {
+                recordingManager.completedRetranscribeIDs.remove(meeting.id)
+                showRewrite = true
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            Button("Dismiss") {
+                recordingManager.completedRetranscribeIDs.remove(meeting.id)
+            }
+            .buttonStyle(.plain)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.Colors.ink2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.Colors.chip, in: RoundedRectangle(cornerRadius: Theme.Metrics.radius))
+        .padding(.horizontal, Theme.Metrics.pad)
+        .padding(.bottom, 8)
     }
 
     /// Honest heads-up on a salvaged call: its transcript is intact but the tail

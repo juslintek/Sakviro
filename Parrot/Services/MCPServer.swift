@@ -199,7 +199,7 @@ enum MCPServer {
             return result([
                 "protocolVersion": requested ?? protocolVersion,
                 "capabilities": ["tools": ["listChanged": false], "prompts": ["listChanged": false]],
-                "serverInfo": ["name": "parrot", "version": AppUpdater.currentVersion],
+                "serverInfo": ["name": MCPBundle.mcpName, "version": AppUpdater.currentVersion],
                 "instructions": instructions,
             ])
         case "ping":

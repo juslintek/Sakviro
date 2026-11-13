@@ -8,6 +8,7 @@ struct CLIProviderSettings: View {
     @AppStorage private var format: String
     @State private var checkMessage = ""
     @State private var checking = false
+    @State private var testingPrompt = false
 
     init(kind: CopilotProviderKind) {
         self.kind = kind
@@ -23,7 +24,9 @@ struct CLIProviderSettings: View {
                 .textFieldStyle(.roundedBorder).frame(width: 260)
                 .onChange(of: path) { _, _ in checkMessage = "" }
             Button(checking ? "Checking…" : "Check") { Task { await check() } }
-                .disabled(checking)
+                .disabled(checking || testingPrompt)
+            Button(testingPrompt ? "Testing…" : "Test Live Prompt") { Task { await testLivePrompt() } }
+                .disabled(checking || testingPrompt)
         }
         if kind == .customCLI {
             SettingsLabeledRow(title: "Arguments", detail: "JSON array of arguments. Use {model} as an argument for the selected model. The prompt is sent through stdin.") {
@@ -44,7 +47,7 @@ struct CLIProviderSettings: View {
             .onChange(of: model) { _, _ in checkMessage = "" }
         ProviderAutoModelSettings(kind: kind, manual: $model)
         SettingsRow {
-            Hint("Meeting text is sent to the CLI account's service. Check confirms the executable only, not sign-in.")
+            Hint("Meeting text is sent to the CLI account's service. Check confirms executable; Test Live Prompt confirms sign-in and model.")
         }
         if !checkMessage.isEmpty { SettingsRow { Hint(checkMessage) } }
     }
@@ -59,8 +62,21 @@ struct CLIProviderSettings: View {
             let request: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
                                           "arguments": ["--version"], "input": "", "timeout": 10.0]
             _ = try await HostHelperClient.shared.perform(JSONSerialization.data(withJSONObject: request), identifier: identifier)
-            checkMessage = "Executable found. Sign-in has not been checked."
+            checkMessage = "Executable found. Use Test Live Prompt to verify sign-in."
         } catch { checkMessage = error.localizedDescription }
+    }
+
+    @MainActor private func testLivePrompt() async {
+        testingPrompt = true
+        defer { testingPrompt = false }
+        let provider = CLIAnalysisProvider { kind }
+        do {
+            let reply = try await provider.complete(system: "Reply with the single word OK.", user: "Reply OK", maxTokens: 16)
+            let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            checkMessage = "Live prompt succeeded: \"\(trimmed.prefix(60))\""
+        } catch {
+            checkMessage = "Live prompt failed: \(error.localizedDescription)"
+        }
     }
 }
 

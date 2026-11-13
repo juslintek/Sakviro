@@ -672,8 +672,10 @@ struct SettingsView: View {
             SettingsRow {
                 OllamaModelStatusView(model: copilotOllamaModel)
             }
-        case .claude, .custom:
+        case .claude:
             EmptyView()
+        case .custom:
+            CustomProviderSettingsView()
         case .claudeCode, .codex, .gemini, .copilot, .customCLI:
             CLIProviderSettings(kind: kind).id(kind)
         }
@@ -702,7 +704,67 @@ struct SettingsView: View {
         ollamaCustomModelEditing || !OllamaCatalog.ids.contains(copilotOllamaModel)
     }
 
+}
 
+struct CustomProviderSettingsView: View {
+    @AppStorage("copilotCustomBaseURL") private var customBaseURL = ""
+    @AppStorage("copilotCustomModel") private var customModel = ""
+    @State private var apiKeyDraft = APIKeyStore.load(account: "custom-llm-api-key") ?? ""
+    @State private var keySaved = APIKeyStore.load(account: "custom-llm-api-key") != nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.controlGap) {
+            SettingsLabeledRow(
+                title: "Endpoint Base URL",
+                detail: "Base URL of an OpenAI-compatible /v1 chat completions endpoint or Google AI Studio OpenAI endpoint."
+            ) {
+                TextField("", text: $customBaseURL, prompt: Text("https://api.openai.com/v1"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 260)
+            }
+            SettingsLabeledRow(
+                title: "Model",
+                detail: "Model name accepted by the endpoint (e.g. gpt-4o, gemini-2.5-flash-lite, deepseek-chat)."
+            ) {
+                TextField("", text: $customModel, prompt: Text("gemini-2.5-flash-lite"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 200)
+            }
+            SettingsLabeledRow(
+                title: "API Key",
+                detail: "Stored securely in your macOS Keychain."
+            ) {
+                HStack(spacing: 8) {
+                    SecureField("", text: $apiKeyDraft, prompt: Text("API key"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                        .onChange(of: apiKeyDraft) { _, newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if trimmed.isEmpty {
+                                APIKeyStore.delete(account: "custom-llm-api-key")
+                                keySaved = false
+                            } else {
+                                keySaved = APIKeyStore.save(trimmed, account: "custom-llm-api-key")
+                            }
+                        }
+                    if keySaved {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.Colors.good)
+                    }
+                }
+            }
+            SettingsRow {
+                Button("Use Google AI Studio (Gemini 2.5 Flash-Lite)") {
+                    customBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                    customModel = "gemini-2.5-flash-lite"
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
 }
 
 enum Appearance: String, CaseIterable {

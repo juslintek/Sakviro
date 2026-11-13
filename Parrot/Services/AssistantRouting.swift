@@ -2,7 +2,8 @@ import Foundation
 
 enum AssistantRoutingSettings {
     static let enabledKey = "assistantEnabledIntegrations"
-    static let availableKinds: [CopilotProviderKind] = [.claudeCode, .codex, .gemini, .copilot, .customCLI, .ollama]
+    static let askPinnedKey = "askPinnedIntegration"
+    static let availableKinds: [CopilotProviderKind] = [.claudeCode, .codex, .gemini, .copilot, .customCLI, .custom, .ollama]
 
     static func configuredKinds(in defaults: UserDefaults = .standard) -> [CopilotProviderKind] {
         let saved = (defaults.string(forKey: enabledKey) ?? "").split(separator: ",").compactMap { CopilotProviderKind(rawValue: String($0)) }
@@ -30,11 +31,12 @@ enum AssistantRoutingSettings {
     }
 
     static func routesLocally(in defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: CloudGate.globalKey) || configuredKinds(in: defaults).allSatisfy { $0 == .ollama }
+        let configured = configuredKinds(in: defaults)
+        return defaults.bool(forKey: CloudGate.globalKey) || (!configured.isEmpty && configured.allSatisfy { $0 == .ollama })
     }
 
     static func supportsImages(_ kind: CopilotProviderKind) -> Bool {
-        [.claudeCode, .codex, .copilot].contains(kind)
+        [.claudeCode, .codex, .copilot, .custom].contains(kind)
     }
 }
 
@@ -43,11 +45,16 @@ final class AssistantRouteState {
     private let lock = NSLock()
     private var retryAfter: [CopilotProviderKind: Date] = [:]
     private var successful: CopilotProviderKind?
+    private let supportsImages: (CopilotProviderKind) -> Bool
+
+    init(supportsImages: @escaping (CopilotProviderKind) -> Bool = AssistantRoutingSettings.supportsImages) {
+        self.supportsImages = supportsImages
+    }
 
     func candidates(_ enabled: [CopilotProviderKind], images: Bool, now: Date = Date()) -> [CopilotProviderKind] {
         lock.lock(); defer { lock.unlock() }
         let eligible = enabled.filter {
-            (!images || AssistantRoutingSettings.supportsImages($0)) && (retryAfter[$0] ?? .distantPast) <= now
+            (!images || supportsImages($0)) && (retryAfter[$0] ?? .distantPast) <= now
         }
         guard let successful, eligible.contains(successful) else { return eligible }
         return [successful] + eligible.filter { $0 != successful }
@@ -67,7 +74,7 @@ final class AssistantRouteState {
 }
 
 final class AssistantRoutingProvider: AnalysisProvider {
-    private let state = AssistantRouteState()
+    private let state: AssistantRouteState
     private let defaults: UserDefaults
     private let providers: [CopilotProviderKind: AnalysisProvider]
     private let lock = NSLock()
@@ -76,12 +83,20 @@ final class AssistantRoutingProvider: AnalysisProvider {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         AssistantRoutingSettings.migrate(in: defaults)
-        var providers: [CopilotProviderKind: AnalysisProvider] = [.ollama: OpenAICompatibleProvider { .ollama }]
+        self.state = AssistantRouteState { kind in
+            kind == .gemini ? CLIAnalysisProvider.isAntigravityConfigured(in: defaults) : AssistantRoutingSettings.supportsImages(kind)
+        }
+        var providers: [CopilotProviderKind: AnalysisProvider] = [
+            .ollama: OpenAICompatibleProvider { .ollama },
+            .custom: OpenAICompatibleProvider { .custom }
+        ]
         for kind in AssistantRoutingSettings.availableKinds where kind.isCLI {
             providers[kind] = CLIAnalysisProvider { kind }
         }
         self.providers = providers
     }
+
+    func provider(for kind: CopilotProviderKind) -> AnalysisProvider? { providers[kind] }
 
     var isConfigured: Bool { !AssistantRoutingSettings.configuredKinds(in: defaults).isEmpty }
     var usageTotals: AITokenTotals {
@@ -106,11 +121,29 @@ final class AssistantRoutingProvider: AnalysisProvider {
     }
     func resetUsage() { for provider in providers.values { provider.resetUsage() } }
 
-    private func route<Answer>(images: Bool = false, operation: (AnalysisProvider) async throws -> Answer) async throws -> Answer {
+    private func route<Answer>(images: Bool = false, preferredKind: CopilotProviderKind? = nil, operation: (AnalysisProvider) async throws -> Answer) async throws -> Answer {
         try Task.checkCancellation()
         let enabled = CloudGate.forcesLocal ? [.ollama] : AssistantRoutingSettings.configuredKinds(in: defaults)
-        let candidates = state.candidates(enabled, images: images)
         var failures: [String] = []
+        if let preferred = preferredKind,
+           (!CloudGate.forcesLocal || preferred == .ollama),
+           AssistantRoutingSettings.enabled(preferred, defaults: defaults),
+           let provider = providers[preferred] {
+            do {
+                if preferred.isCLI && preferred != .customCLI { try await CLIAnalysisProvider.checkExecutable(preferred) }
+                try Task.checkCancellation()
+                let answer = try await operation(provider)
+                try Task.checkCancellation()
+                state.succeeded(preferred)
+                remember(preferred)
+                return answer
+            } catch {
+                if Task.isCancelled || error is CancellationError { throw CancellationError() }
+                state.failed(preferred)
+                failures.append("\(preferred.label): \(error.localizedDescription)")
+            }
+        }
+        let candidates = state.candidates(enabled, images: images).filter { $0 != preferredKind }
         for kind in candidates {
             try Task.checkCancellation()
             guard let provider = providers[kind] else { continue }
@@ -165,6 +198,10 @@ final class AssistantRoutingProvider: AnalysisProvider {
     }
 
     func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext) async throws -> String {
-        try await route { try await $0.complete(system: system, user: user, maxTokens: maxTokens, context: context) }
+        try await complete(system: system, user: user, maxTokens: maxTokens, context: context, preferredKind: nil)
+    }
+
+    func complete(system: String, user: String, maxTokens: Int, context: ModelTaskContext, preferredKind: CopilotProviderKind? = nil) async throws -> String {
+        try await route(preferredKind: preferredKind) { try await $0.complete(system: system, user: user, maxTokens: maxTokens, context: context) }
     }
 }

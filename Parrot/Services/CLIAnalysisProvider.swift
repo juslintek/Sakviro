@@ -39,6 +39,17 @@ final class CLIAnalysisProvider: AnalysisProvider {
         }
     }
 
+    static func isAntigravityConfigured(in defaults: UserDefaults = .standard) -> Bool {
+        let raw = (defaults.string(forKey: "cli_gemini_path") ?? defaults.string(forKey: "cli_gemini_command") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw == "@agy" || raw == "agy" || raw.hasSuffix("/agy") { return true }
+        if raw.isEmpty {
+            let home = NSHomeDirectory()
+            let paths = ["\(home)/.local/bin/agy", "/opt/homebrew/bin/agy", "/usr/local/bin/agy", "/usr/bin/agy"]
+            return paths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        }
+        return false
+    }
+
     static func checkExecutable(_ kind: CopilotProviderKind) async throws {
         let identifier = UUID().uuidString
         let request: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable(kind),
@@ -54,10 +65,18 @@ final class CLIAnalysisProvider: AnalysisProvider {
         return usedModels.count > 1 ? "Multiple models" : usedModels.first
     }
     func resetUsage() { lock.lock(); totals = AITokenTotals(); usedModels.removeAll(); lock.unlock() }
-    func recordCall(kind: CopilotProviderKind, model: String) {
+    func recordCall(kind: CopilotProviderKind, model: String, inputTokens: Int = 0, outputTokens: Int = 0, resolvedModel: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        usedModels.insert(model.isEmpty ? "\(kind.label) (default)" : model)
-        totals.calls += 1
+        let modelToRecord: String
+        if let resolvedModel, !resolvedModel.isEmpty {
+            modelToRecord = resolvedModel
+        } else if !model.isEmpty {
+            modelToRecord = model
+        } else {
+            modelToRecord = "\(kind.label) (default)"
+        }
+        usedModels.insert(modelToRecord)
+        totals = AITokenTotals(inputTokens: totals.inputTokens + inputTokens, outputTokens: totals.outputTokens + outputTokens, calls: totals.calls + 1)
     }
 
     func analyze(_ request: AnalysisRequest) async throws -> AnalysisResult {
@@ -140,7 +159,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
                 case "pro": agyModel = "gemini-4-hydrogen-medium"
                 default: agyModel = model
                 }
-                arguments = ["-p", "\(system)\n\n\(user)", "--output-format", "json", "--disable-slash-commands", "--model", agyModel]
+                arguments = ["-p", "", "--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--model", agyModel]
             } else {
                 arguments = ["-p", "Answer the supplied text.", "-o", "json"]
                 if !model.isEmpty { arguments += ["--model", model] }
@@ -152,25 +171,85 @@ final class CLIAnalysisProvider: AnalysisProvider {
         let identifier = UUID().uuidString
         let isAgy = kind == .gemini && (executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy")
         var payload: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
-                                      "arguments": arguments, "input": isAgy ? "" : "\(system)\n\n\(user)", "timeout": 90.0,
+                                      "arguments": arguments, "input": "\(system)\n\n\(user)", "timeout": 90.0,
                                       "preset": isAgy ? "antigravity" : kind.rawValue]
         if let jpeg {
-            guard [.claudeCode, .codex, .copilot].contains(kind), ScreenContext.validateJPEG(jpeg) else {
+            guard ([.claudeCode, .codex, .copilot].contains(kind) || (kind == .gemini && isAgy)), ScreenContext.validateJPEG(jpeg) else {
                 throw AnalysisError.badResponse("This CLI cannot accept the selected screen image.")
             }
             payload["jpeg"] = jpeg.base64EncodedString()
         }
         let response = try await HostHelperClient.shared.perform(JSONSerialization.data(withJSONObject: payload), identifier: identifier)
-        let text: String
+        guard let responseString = String(data: response, encoding: .utf8) else {
+            throw AnalysisError.badResponse("CLI returned invalid UTF-8.")
+        }
+        let parsedResult: (text: String, inputTokens: Int, outputTokens: Int)
         if kind == .claudeCode {
-            text = try Self.claudeAnswer(response)
+            parsedResult = try Self.parseCLIOutput(responseString, kind: kind)
+        } else if isAgy {
+            parsedResult = try Self.parseCLIOutput(responseString, kind: kind, isAgy: true)
         } else {
             let format = kind == .codex ? "codex" : kind == .copilot ? "copilot" : kind == .gemini ? "gemini" : Self.setting(kind, "format")
-            text = try Self.customAnswer(response, format: format)
+            let text = try Self.customAnswer(response, format: format)
+            parsedResult = (text, 0, 0)
         }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AnalysisError.badResponse("CLI returned an empty answer.") }
-        recordCall(kind: kind, model: model)
-        return text
+        guard !parsedResult.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AnalysisError.badResponse("CLI returned an empty answer.") }
+        recordCall(kind: kind, model: model, inputTokens: parsedResult.inputTokens, outputTokens: parsedResult.outputTokens)
+        return parsedResult.text
+    }
+
+    static func parseCLIOutput(_ raw: String, kind: CopilotProviderKind, isAgy: Bool = false) throws -> (text: String, inputTokens: Int, outputTokens: Int) {
+        if isAgy || kind == .gemini {
+            let lines = raw.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            for line in lines.reversed() {
+                guard let lineData = line.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+                if (obj["event"] as? String) == "result", let res = obj["result"] as? [String: Any] {
+                    if (res["status"] as? String) == "ERROR" {
+                        throw AnalysisError.badResponse((res["error"] as? String) ?? "Antigravity error")
+                    }
+                    let responseText = (res["response"] as? String) ?? ""
+                    let usage = res["usage"] as? [String: Any] ?? [:]
+                    let inputTokens = usage["input_tokens"] as? Int ?? 0
+                    let outputTokens = usage["output_tokens"] as? Int ?? 0
+                    return (responseText, inputTokens, outputTokens)
+                }
+            }
+            if let singleObj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] {
+                if singleObj["error"] != nil {
+                    throw AnalysisError.badResponse("Invalid Gemini CLI response.")
+                }
+                if let answer = singleObj["response"] as? String {
+                    let usage = singleObj["usage"] as? [String: Any] ?? [:]
+                    let inTok = usage["input_tokens"] as? Int ?? 0
+                    let outTok = usage["output_tokens"] as? Int ?? 0
+                    return (answer, inTok, outTok)
+                }
+            }
+            throw AnalysisError.badResponse("Invalid Gemini CLI response.")
+        }
+        if kind == .claudeCode {
+            let text = try claudeAnswer(Data(raw.utf8))
+            let decoded = try? JSONSerialization.jsonObject(with: Data(raw.utf8))
+            let events: [[String: Any]]
+            if let array = decoded as? [[String: Any]] { events = array }
+            else if let object = decoded as? [String: Any] { events = [object] }
+            else {
+                events = raw.split(whereSeparator: \.isNewline).compactMap { line in
+                    try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+                }
+            }
+            let object = events.last(where: { ($0["type"] as? String) == "result" }) ?? (events.count == 1 ? events.first : nil)
+            let usage = object?["usage"] as? [String: Any] ?? [:]
+            let inputTokens = (usage["input_tokens"] as? Int ?? 0)
+                + (usage["cache_read_input_tokens"] as? Int ?? 0)
+                + (usage["cache_creation_input_tokens"] as? Int ?? 0)
+            let outputTokens = usage["output_tokens"] as? Int ?? 0
+            return (text, inputTokens, outputTokens)
+        }
+        let format = kind == .codex ? "codex" : kind == .copilot ? "copilot" : "plain"
+        let answer = try customAnswer(Data(raw.utf8), format: format)
+        return (answer, 0, 0)
     }
 
     static func claudeAnswer(_ response: Data) throws -> String {

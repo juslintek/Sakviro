@@ -304,6 +304,10 @@ struct ParrotApp: App {
                     applyAppearance()
                     appDelegate.recordingManager = recordingManager
                     appDelegate.appSession = appSession
+                    FloatingAssistantWidgetController.shared.configure(
+                        recordingManager: recordingManager,
+                        appSession: appSession
+                    )
                 }
                 .background {
                     WindowOpener { appDelegate.openMainWindow = $0 }

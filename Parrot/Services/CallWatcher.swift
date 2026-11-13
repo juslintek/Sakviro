@@ -128,7 +128,15 @@ final class CallWatcher: NSObject, UNUserNotificationCenterDelegate {
         if mode != .off, let reading = MicActivity.snapshot(isRecording: isRecording) {
             let detected = CallDetector.relevantApps(reading, ignored: Self.ignoredApps)
             let hasCalendarCall = manager.calendar.isConnected && manager.calendar.currentEvent()?.hasCallLink == true
-            let apps = hasCalendarCall ? detected : detected.filter { CallDetector.isKnownMeetingApp($0) }
+            let apps = detected.filter { appID in
+                if CallDetector.isDedicatedCallApp(appID) {
+                    return true
+                }
+                if CallDetector.isBrowserApp(appID) {
+                    return hasCalendarCall || BrowserCallInspector.hasActiveMeetingWindow(for: appID)
+                }
+                return hasCalendarCall
+            }
             // The call app let go of the mic before anyone answered: the
             // start offer is stale.
             if apps.isEmpty, prompt?.kind == .start { clearPrompt() }

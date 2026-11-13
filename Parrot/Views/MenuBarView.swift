@@ -17,6 +17,7 @@ struct MenuBarView: View {
     /// Follow is asked once; after that click (followed or not, X won't
     /// say) the item turns into a standing "say hi".
     @AppStorage("menuBarFollowClicked") private var followClicked = false
+    @AppStorage("floatingWidgetAutoShow") private var floatingWidgetAutoShow = true
 
     private static var newestFirst: FetchDescriptor<Meeting> {
         var descriptor = FetchDescriptor<Meeting>(sortBy: [SortDescriptor(\.date, order: .reverse)])
@@ -60,6 +61,7 @@ struct MenuBarView: View {
                 FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
             }
             .keyboardShortcut("w", modifiers: [.option, .command])
+            .help("Toggle floating assistant (⌥⌘W, global ⌃⌥W)")
 
             Button(recordingManager.isStopping ? "Finalizing…" : "Stop Recording") {
                 Task { await recordingManager.stopRecording() }
@@ -68,6 +70,11 @@ struct MenuBarView: View {
             .disabled(recordingManager.isStopping)
         } else {
             heardSoFar
+            if !recordingManager.calendar.isConnected {
+                Button("Connect Calendar to detect scheduled meetings") {
+                    Task { await recordingManager.calendar.connect() }
+                }
+            }
             nextCall
             if !recordingManager.transcriptionEngine.isReady {
                 Text("Loading speech model…")
@@ -81,6 +88,9 @@ struct MenuBarView: View {
                 FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
             }
             .keyboardShortcut("w", modifiers: [.option, .command])
+            .help("Toggle floating assistant (⌥⌘W, global ⌃⌥W)")
+
+            Toggle("Auto-open Assistant on Calls", isOn: $floatingWidgetAutoShow)
 
             Divider()
 
@@ -104,6 +114,12 @@ struct MenuBarView: View {
         Button("Open \(MeetingActions.appName)") { showMainWindow() }
         Button("Quit \(MeetingActions.appName)") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+            .onAppear {
+                FloatingAssistantWidgetController.shared.configure(
+                    recordingManager: recordingManager,
+                    appSession: appSession
+                )
+            }
     }
 
     /// A greyed header: everything Parrot has heard. Not read mid-call (that

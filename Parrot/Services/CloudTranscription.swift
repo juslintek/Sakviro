@@ -1,5 +1,39 @@
 import Foundation
 
+struct TranscriptionJobProgress: Equatable, Sendable {
+    enum Stage: Equatable, Sendable {
+        case preparingModel(String)
+        case transcribing(trackLabel: String, completedSeconds: Double, totalSeconds: Double)
+        case diarizing
+        case indexingAndSaving
+        case updatingReport
+    }
+
+    let meetingID: UUID
+    let fraction: Double
+    let stage: Stage
+    let startedAt: Date
+
+    var statusText: String {
+        let pct = Int((min(max(fraction, 0), 1) * 100).rounded())
+        switch stage {
+        case .preparingModel(let name): return "Loading \(name)… \(pct)%"
+        case .transcribing(let track, let done, let total):
+            return "Transcribing \(track) (\(Int(done))s / \(Int(max(total, 1)))s) · \(pct)%"
+        case .diarizing: return "Separating speakers… \(pct)%"
+        case .indexingAndSaving: return "Indexing transcript… \(pct)%"
+        case .updatingReport: return "Updating report… \(pct)%"
+        }
+    }
+
+    func estimatedRemaining(now: Date = .now) -> TimeInterval? {
+        guard fraction >= 0.05, fraction < 0.99 else { return nil }
+        let elapsed = now.timeIntervalSince(startedAt)
+        guard elapsed >= 2 else { return nil }
+        return max(1, elapsed * (1.0 - fraction) / fraction)
+    }
+}
+
 /// Cloud transcription backends (bring-your-own-key). On-device Whisper stays
 /// the default and the always-available fallback; these exist for users who
 /// trade "audio never leaves the Mac" for accuracy (Groq) or latency (Deepgram).
@@ -374,15 +408,27 @@ enum TranscriptPolisher {
     typealias Line = (text: String, start: Double, end: Double)
 
     /// Groq: 10-minute parts, timestamps shifted back onto the track.
-    static func polish(systemPath: String?, micPath: String?,
-                       language: String?, apiKey: String,
-                       timeline: ([Float]) async -> [Float]? = { _ in nil })
-    async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
-        try await polish(systemPath: systemPath, micPath: micPath, timeline: timeline) { samples, _ in
+    static func polish(
+        systemPath: String?,
+        micPath: String?,
+        language: String?,
+        apiKey: String,
+        timeline: ([Float]) async -> [Float]? = { _ in nil },
+        onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil
+    ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
+        try await polish(
+            systemPath: systemPath,
+            micPath: micPath,
+            timeline: timeline,
+            onProgress: onProgress
+        ) { samples, _, reportTrackProgress in
             var lines: [Line] = []
             let partLength = 16000 * partSeconds
             var offset = 0
+            let trackTotalSeconds = max(Double(samples.count) / 16000.0, 0.001)
+            reportTrackProgress?(0, trackTotalSeconds)
             while offset < samples.count {
+                try Task.checkCancellation()
                 let part = Array(samples[offset ..< min(offset + partLength, samples.count)])
                 let shift = Double(offset) / 16000.0
                 // No glossary prompt here either (see the live Groq decode).
@@ -391,6 +437,7 @@ enum TranscriptPolisher {
                     fileName: "part.wav", language: language, apiKey: apiKey)
                 lines += segments.map { (TranscriptionEngine.cleaned($0.text), $0.start + shift, $0.end + shift) }
                 offset += partLength
+                reportTrackProgress?(min(Double(offset) / 16000.0, trackTotalSeconds), trackTotalSeconds)
             }
             return lines
         }
@@ -406,38 +453,105 @@ enum TranscriptPolisher {
     /// Me lines the live echo gate would skip are dropped too (#98: the
     /// re-decode brought back the echo the live call had removed);
     /// `micHearsSpeakers` says whether any was.
-    static func polish(systemPath: String?, micPath: String?,
-                       timeline: ([Float]) async -> [Float]? = { _ in nil },
-                       transcribe: ([Float], URL) async throws -> [Line])
-    async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
-        var out: [PolishedSegment] = []
-        var themLevels: [Float]?
-        var micHearsSpeakers = false
-        for (path, speaker) in [(systemPath, "Them"), (micPath, "Me")] {
+    static func polish(
+        systemPath: String?,
+        micPath: String?,
+        timeline: ([Float]) async -> [Float]? = { _ in nil },
+        transcribe: ([Float], URL) async throws -> [Line]
+    ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
+        try await polish(
+            systemPath: systemPath,
+            micPath: micPath,
+            timeline: timeline,
+            onProgress: nil,
+            transcribeWithProgress: { samples, url, _ in
+                try await transcribe(samples, url)
+            }
+        )
+    }
+
+    static func polish(
+        systemPath: String?,
+        micPath: String?,
+        timeline: ([Float]) async -> [Float]? = { _ in nil },
+        onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)?,
+        transcribeWithProgress: ([Float], URL, (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)?) async throws -> [Line]
+    ) async throws -> (segments: [PolishedSegment], micHearsSpeakers: Bool) {
+        struct TrackItem: Sendable {
+            let path: String
+            let speaker: String
+            let label: String
+            let url: URL
+            let samples: [Float]
+        }
+
+        var loadedTracks: [TrackItem] = []
+        for (path, speaker, label) in [
+            (systemPath, "Them", "System audio"),
+            (micPath, "Me", "Microphone")
+        ] {
             guard let path, FileManager.default.fileExists(atPath: path) else { continue }
             let url = URL(fileURLWithPath: path)
             guard let samples = try? AudioFileLoader.load16kMono(url: url) else {
                 NSLog("Parrot: polish skipped \(speaker) track — unsupported format")
                 continue
             }
+            loadedTracks.append(TrackItem(path: path, speaker: speaker, label: label, url: url, samples: samples))
+        }
+
+        let totalAudioDuration = max(loadedTracks.reduce(0.0) { $0 + max(Double($1.samples.count) / 16000.0, 0.001) }, 0.001)
+        var completedAudioSeconds = 0.0
+
+        var out: [PolishedSegment] = []
+        var themLevels: [Float]?
+        var micHearsSpeakers = false
+
+        for track in loadedTracks {
+            try Task.checkCancellation()
+            let trackDuration = max(Double(track.samples.count) / 16000.0, 0.001)
+            let baseCompleted = completedAudioSeconds
+            let label = track.label
+
+            let trackProgress: (@Sendable (Double, Double) -> Void)?
+            if let onProgress {
+                trackProgress = { (done: Double, _: Double) in
+                    let trackDone = min(max(done, 0.0), trackDuration)
+                    let currentTotal = baseCompleted + trackDone
+                    let frac = min(max(currentTotal / totalAudioDuration, 0.0), 1.0)
+                    onProgress(label, trackDone, trackDuration, frac)
+                }
+            } else {
+                trackProgress = nil
+            }
+
+            trackProgress?(0, trackDuration)
+
             // The system track comes first; keep only its loudness for the Me pass.
-            let levels = EchoGate.envelope(samples[...])
-            if speaker == "Them" { themLevels = levels }
-            let voice = await timeline(samples)
-            for s in try await transcribe(samples, url) {
+            let levels = EchoGate.envelope(track.samples[...])
+            if track.speaker == "Them" { themLevels = levels }
+            let voice = await timeline(track.samples)
+
+            let lines = try await transcribeWithProgress(track.samples, track.url, trackProgress)
+
+            for s in lines {
                 guard !s.text.isEmpty else { continue }
                 if let voice, !TranscriptionEngine.hasVoice(voice, from: s.start, to: s.end) {
                     continue
                 }
-                let line = PolishedSegment(text: s.text, start: s.start, end: s.end, speaker: speaker)
-                if speaker == "Me", let themLevels,
-                   isEcho(line, mic: samples, micLevels: levels, themLevels: themLevels) {
+                let line = PolishedSegment(text: s.text, start: s.start, end: s.end, speaker: track.speaker)
+                if track.speaker == "Me", let themLevels,
+                   isEcho(line, mic: track.samples, micLevels: levels, themLevels: themLevels) {
                     micHearsSpeakers = true
                     continue
                 }
                 out.append(line)
             }
+
+            completedAudioSeconds += trackDuration
+            let endFrac = min(max(completedAudioSeconds / totalAudioDuration, 0.0), 1.0)
+            onProgress?(track.label, trackDuration, trackDuration, endFrac)
         }
+
         return (out.sorted { $0.start < $1.start }, micHearsSpeakers)
     }
 

@@ -75,6 +75,7 @@ final class HostCLIService {
         let outcome = Result { () throws -> Data in
         var processArguments = arguments
         var processInput = input
+        var validatedJPEG: Data?
         if let encoded = object["jpeg"] {
             guard let base64 = encoded as? String, base64.utf8.count <= 682_668,
                   let jpeg = Data(base64Encoded: base64), !jpeg.isEmpty, jpeg.count <= 512_000,
@@ -88,6 +89,7 @@ final class HostCLIService {
                   CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
                 throw failure("Invalid screen JPEG.")
             }
+            validatedJPEG = jpeg
             switch object["preset"] as? String {
             case "claudeCode":
                 let message: [String: Any] = ["type": "user", "message": ["role": "user", "content": [
@@ -103,8 +105,27 @@ final class HostCLIService {
                     guard processArguments.last == "-" else { throw failure("Invalid Codex attachment configuration.") }
                     processArguments.insert(contentsOf: ["--image", attachment.path], at: processArguments.count - 1)
                 } else { processArguments += ["--attachment", attachment.path] }
+            case "antigravity":
+                break
             default: throw failure("This CLI cannot accept screen images.")
             }
+        }
+        if object["preset"] as? String == "antigravity", processArguments.contains("stream-json") {
+            if !processArguments.contains("--settings") {
+                processArguments += ["--settings", "{}"]
+            }
+            let envelope: [String: Any]
+            if let validatedJPEG, !validatedJPEG.isEmpty {
+                let messageContent: [[String: Any]] = [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": validatedJPEG.base64EncodedString()]],
+                    ["type": "text", "text": input]
+                ]
+                envelope = ["event": "user", "message": ["content": messageContent]]
+            } else {
+                envelope = ["event": "user", "message": ["content": input]]
+            }
+            let stdinData = try JSONSerialization.data(withJSONObject: envelope)
+            processInput = String(decoding: stdinData, as: UTF8.self) + "\n"
         }
         var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
         guard pipe(&inputPipe) == 0, pipe(&outputPipe) == 0, pipe(&errorPipe) == 0 else { throw failure("Could not create CLI pipes.") }
@@ -214,18 +235,18 @@ final class HostCLIService {
         if state.timedOut { throw failure("CLI timed out.") }
         if state.overflow { throw failure("CLI output exceeded the limit.") }
         guard exitStatus == 0 else {
-            if object["preset"] as? String == "gemini",
-               let output = String(data: state.output + state.errors, encoding: .utf8),
-               output.contains("UNSUPPORTED_CLIENT") {
+            let combined = String(data: state.output + state.errors, encoding: .utf8) ?? ""
+            if object["preset"] as? String == "gemini", combined.contains("UNSUPPORTED_CLIENT") {
                 throw failure("Gemini CLI reported UNSUPPORTED_CLIENT. Google does not support this client for the current account.")
             }
-            if object["preset"] as? String == "gemini",
-               let output = String(data: state.output + state.errors, encoding: .utf8),
-               output.contains("IneligibleTierError") {
+            if object["preset"] as? String == "gemini", combined.contains("IneligibleTierError") {
                 throw failure("Gemini CLI reported an ineligible account tier.")
             }
-            if let output = String(data: state.output, encoding: .utf8), output.localizedCaseInsensitiveContains("not logged in") {
+            if combined.localizedCaseInsensitiveContains("not logged in") || combined.localizedCaseInsensitiveContains("not authenticated") {
                 throw failure("CLI is not signed in. Sign in through the CLI, then try again.")
+            }
+            if let diagnostic = Self.extractDiagnostic(output: state.output, errors: state.errors, home: home), !diagnostic.isEmpty {
+                throw failure("CLI failed: \(diagnostic)")
             }
             throw failure("CLI failed. Check its sign-in and configuration.")
         }
@@ -238,6 +259,52 @@ final class HostCLIService {
 
     private func failure(_ text: String) -> NSError {
         NSError(domain: "ParrotCLI", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
+    }
+
+    private static func extractDiagnostic(output: Data, errors: Data, home: String) -> String? {
+        if let obj = try? JSONSerialization.jsonObject(with: output) as? [String: Any] {
+            if let err = obj["error"] as? String, !err.isEmpty {
+                return sanitizeDiagnostic(err, home: home)
+            }
+            if let errObj = obj["error"] as? [String: Any], let msg = errObj["message"] as? String, !msg.isEmpty {
+                return sanitizeDiagnostic(msg, home: home)
+            }
+        } else if let outStr = String(data: output, encoding: .utf8) {
+            let lines = outStr.components(separatedBy: .newlines).reversed()
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, let lineData = trimmed.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+                if let res = obj["result"] as? [String: Any], let err = res["error"] as? String, !err.isEmpty {
+                    return sanitizeDiagnostic(err, home: home)
+                }
+                if let err = obj["error"] as? String, !err.isEmpty {
+                    return sanitizeDiagnostic(err, home: home)
+                }
+            }
+        }
+        if let errStr = String(data: errors, encoding: .utf8) {
+            let lines = errStr.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if let lastLine = lines.last(where: { !$0.isEmpty }) {
+                return sanitizeDiagnostic(lastLine, home: home)
+            }
+        }
+        return nil
+    }
+
+    private static func sanitizeDiagnostic(_ raw: String, home: String) -> String {
+        var text = raw.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        if !home.isEmpty {
+            text = text.replacingOccurrences(of: home, with: "~")
+        }
+        if let regex = try? NSRegularExpression(pattern: "(ya29\\.[A-Za-z0-9_-]+|AIza[0-9A-Za-z-_]{35}|Bearer\\s+[A-Za-z0-9_.-]+)", options: .caseInsensitive) {
+            text = regex.stringByReplacingMatches(in: text, options: [], range: NSRange(location: 0, length: text.utf16.count), withTemplate: "[REDACTED]")
+        }
+        let singleLine = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        if singleLine.count > 240 {
+            return String(singleLine.prefix(237)) + "..."
+        }
+        return singleLine
     }
 }
 

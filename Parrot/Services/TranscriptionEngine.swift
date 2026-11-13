@@ -160,6 +160,14 @@ final class TranscriptionEngine {
         let startTime: TimeInterval
         let endTime: TimeInterval
         let confidence: Float?
+
+        init(text: String, source: AudioSource = .them, startTime: TimeInterval, endTime: TimeInterval, confidence: Float? = nil) {
+            self.text = text
+            self.source = source
+            self.startTime = startTime
+            self.endTime = endTime
+            self.confidence = confidence
+        }
     }
 
     // MARK: - Model Management
@@ -1149,6 +1157,7 @@ final class TranscriptionEngine {
                     // fallback when a cloud backend hiccups (never lose a chunk).
                     func decodeLocally() async throws -> [(text: String, confidence: Float?)] {
                         if Self.isMLX(self.currentModel) {
+                            let language = MLXTranscriber.effectiveLanguage(for: self.currentModel, selected: TranscriptionLanguage.selected)
                             return [(try await MLXTranscriber.perform(action: "transcribe", model: self.currentModel,
                                                                      samples: decodeSamples, language: language), nil)]
                         }
@@ -1646,26 +1655,48 @@ final class TranscriptionEngine {
     /// derives them from sample offsets and suppresses them, but for a whole file
     /// Whisper's per-utterance boundaries are exactly what we want.
     /// WhisperKit loads + resamples any format (m4a/mp3/wav/aac/caf) to 16 kHz mono.
-    func transcribeFile(url: URL) async throws -> [TranscriptionResult] {
+    func transcribeFile(
+        url: URL,
+        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil
+    ) async throws -> [TranscriptionResult] {
+        let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
+        let totalSeconds = max(Double(samples.count) / 16000.0, 0.001)
+        if !samples.isEmpty {
+            onProgress?(0, totalSeconds)
+        }
+
         if Self.isMLX(currentModel) {
-            let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
             let timeline = await speechTimeline(url: url)
             var lines: [TranscriptionResult] = []
             var start = 0
             while start < samples.count {
                 try Task.checkCancellation()
-                let end = try MLXTranscriber.importBoundary(samples, from: start)
-                let from = Double(start) / 16000, to = Double(end) / 16000
+                let end = (try? MLXTranscriber.importBoundary(samples, from: start)) ?? min(samples.count, start + 480_000)
+                guard end > start else { break }
+                let from = Double(start) / 16000.0, to = Double(end) / 16000.0
                 if timeline.map({ Self.hasVoice($0, from: from, to: to) }) ?? true {
-                    let text = Self.cleaned(try await MLXTranscriber.perform(action: "transcribe", model: currentModel,
-                        samples: Self.normalizedForDecode(Array(samples[start..<end])), language: TranscriptionLanguage.selected))
-                    if !text.isEmpty { lines.append(TranscriptionResult(text: text, source: .them, startTime: from, endTime: to, confidence: nil)) }
+                    let language = MLXTranscriber.effectiveLanguage(for: currentModel, selected: TranscriptionLanguage.selected)
+                    let segments = try await MLXTranscriber.performSegments(
+                        samples: Self.normalizedForDecode(Array(samples[start..<end])),
+                        model: currentModel,
+                        language: language
+                    )
+                    let chunkOffset = Double(start) / 16000.0
+                    for seg in segments {
+                        let segStart = chunkOffset + max(0, seg.start)
+                        let segEnd = min(Double(end) / 16000.0, chunkOffset + max(seg.end, seg.start + 0.1))
+                        let text = Self.cleaned(seg.text)
+                        if !text.isEmpty {
+                            lines.append(TranscriptionResult(text: text, source: .them, startTime: segStart, endTime: segEnd, confidence: 1.0))
+                        }
+                    }
                 }
+                onProgress?(Double(end) / 16000.0, totalSeconds)
                 start = end
             }
             return lines
         }
-        if let parakeet, let lines = try await parakeetImport(url: url, parakeet: parakeet) { return lines }
+        if let parakeet, let lines = try await parakeetImport(url: url, samples: samples, totalSeconds: totalSeconds, parakeet: parakeet, onProgress: onProgress) { return lines }
         // Whisper: on Parakeet, loaded for this file only when it needs it.
         guard let whisperKit = await ensureWhisper() else { throw RecordingError.modelNotReady }
 
@@ -1691,7 +1722,10 @@ final class TranscriptionEngine {
         // only with a prompt/timestamp combo that a real file proves works.
         glossaryActive = false
 
+        try Task.checkCancellation()
         let results = try await whisperKit.transcribe(audioPath: url.path, decodeOptions: options)
+        try Task.checkCancellation()
+        onProgress?(totalSeconds, totalSeconds)
         let timeline = await speechTimeline(url: url)
 
         // One mixed track, so every segment is "Them"; diarization splits it later.
@@ -1719,10 +1753,17 @@ final class TranscriptionEngine {
     /// language Parakeet lacks, or on Auto any of three 30 s windows that
     /// isn't confidently one of its 25 (one mixed track, so the whole file
     /// goes one way).
-    private func parakeetImport(url: URL, parakeet: ParakeetTranscriber) async throws -> [TranscriptionResult]? {
+    private func parakeetImport(
+        url: URL,
+        samples providedSamples: [Float]? = nil,
+        totalSeconds providedTotalSeconds: Double? = nil,
+        parakeet: ParakeetTranscriber,
+        onProgress: (@Sendable (_ completedSeconds: Double, _ totalSeconds: Double) -> Void)? = nil
+    ) async throws -> [TranscriptionResult]? {
         let pinned = TranscriptionLanguage.selected
         if let pinned, !LanguageRouter.parakeetLanguages.contains(pinned) { return nil }
-        let samples = AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
+        let samples = try providedSamples ?? AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
+        let totalSeconds = providedTotalSeconds ?? max(Double(samples.count) / 16000.0, 0.001)
         var hint = pinned
         if pinned == nil {
             var verdicts: [(language: String?, confidence: Float)] = []
@@ -1742,14 +1783,21 @@ final class TranscriptionEngine {
         let timeline = await speechTimeline(samples: samples)
         var lines: [TranscriptionResult] = []
         for piece in Self.utterances(in: samples) {
+            try Task.checkCancellation()
             let start = Double(piece.start) / 16000, end = Double(piece.start + piece.audio.count) / 16000
             // Lines over a stretch with no voice would be invented.
-            if let timeline, !Self.hasVoice(timeline, from: start, to: end) { continue }
+            if let timeline, !Self.hasVoice(timeline, from: start, to: end) {
+                onProgress?(end, totalSeconds)
+                continue
+            }
             let text = Self.cleaned(try await parakeet.transcribe(Self.normalizedForDecode(piece.audio), language: hint))
-            guard !text.isEmpty else { continue }
-            // One mixed track, so every line is "Them"; diarization splits it later.
-            lines.append(TranscriptionResult(text: text, source: .them, startTime: start, endTime: end, confidence: nil))
+            if !text.isEmpty {
+                // One mixed track, so every line is "Them"; diarization splits it later.
+                lines.append(TranscriptionResult(text: text, source: .them, startTime: start, endTime: end, confidence: nil))
+            }
+            onProgress?(end, totalSeconds)
         }
+        onProgress?(totalSeconds, totalSeconds)
         return lines
     }
 

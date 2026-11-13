@@ -67,6 +67,18 @@ import Darwin
         precondition(envelope?["type"] as? String == "user" && message?["role"] as? String == "user")
         precondition(image?["media_type"] as? String == "image/jpeg" && image?["data"] as? String == (jpeg as Data).base64EncodedString())
         precondition(content?.last?["text"] as? String == "synthetic prompt", claudeOutput.1 ?? "Claude input failed")
+        let agyCheckScript = "import sys,json; assert '--settings' in sys.argv; idx=sys.argv.index('--settings'); assert sys.argv[idx+1]=='{}'; data=json.loads(sys.stdin.read().strip()); assert data['event']=='user'; content=data['message']['content']; assert content[0]['type']=='image' and content[0]['source']['media_type']=='image/jpeg'; assert content[1]['type']=='text' and content[1]['text']=='hello agy'; print('agy-verified')"
+        let agyRequest = try JSONSerialization.data(withJSONObject: [
+            "id": UUID().uuidString,
+            "executable": "/usr/bin/python3",
+            "arguments": ["-c", agyCheckScript, "-p", "", "--input-format", "stream-json", "--output-format", "stream-json"],
+            "input": "hello agy",
+            "timeout": 5,
+            "preset": "antigravity",
+            "jpeg": (jpeg as Data).base64EncodedString()
+        ])
+        let agyOutput = run(agyRequest)
+        precondition(agyOutput.0.flatMap { String(data: $0, encoding: .utf8) } == "agy-verified\n", agyOutput.1 ?? "Antigravity mock CLI failed")
         let invalidJPEG = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/bin/echo",
             "arguments": ["-"], "input": "", "timeout": 3, "preset": "codex", "jpeg": Data("not an image".utf8).base64EncodedString()])
         precondition(run(invalidJPEG).1 == "Invalid screen JPEG.")
