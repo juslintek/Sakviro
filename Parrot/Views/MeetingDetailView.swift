@@ -45,6 +45,7 @@ struct MeetingDetailView: View {
     @State private var tab: ReportTab = .report
     @State private var themNameText = ""
     @State private var showCostBreakdown = false
+    @State private var showAudioQualityInspector = false
     @State private var videoMuxing = false
     @State private var cardNamingLabel: String?
     @State private var clipStopTask: Task<Void, Never>?
@@ -114,8 +115,9 @@ struct MeetingDetailView: View {
             // insight seeking). Needs a real audio file: a recovered call whose .caf
             // couldn't be finalized has its path cleared, so hide the dead control.
             if meeting.status == .done || meeting.status == .processing,
-               meeting.systemAudioPath.nilIfEmpty != nil {
+               meeting.systemAudioPath.nilIfEmpty != nil || meeting.micAudioPath?.nilIfEmpty != nil {
                 audioPlayerBar
+                audioQualityBar
                 Divider()
             }
 
@@ -168,6 +170,12 @@ struct MeetingDetailView: View {
             await recordingManager.writeAboutIfMissing(meeting)
         }
         .onChange(of: appSession.pendingJump) { consumeJump() }
+        .onChange(of: meeting.useCleanedAudio) { _, _ in
+            reloadAudioPlayersPreservingPosition()
+        }
+        .onChange(of: meeting.cleanedSystemAudioPath) { _, _ in
+            reloadAudioPlayersPreservingPosition()
+        }
         // Lines land while a meeting processes, and naming a voice changes
         // the speaker the receipts quote — rebuild on either.
         .task(id: receiptIndexKey) {
@@ -418,7 +426,7 @@ struct MeetingDetailView: View {
                         }
                     }
                 }
-                if (meeting.videoError != nil || meeting.videoWarning != nil), meeting.rawVideoPath != nil {
+                if (meeting.videoError != nil || meeting.videoWarning != nil), (meeting.rawVideoPath != nil || meeting.videoPath != nil) {
                     Button(videoMuxing ? "Preparing…" : "Retry video with audio") {
                         videoMuxing = true
                         Task {
@@ -428,7 +436,23 @@ struct MeetingDetailView: View {
                     }.disabled(videoMuxing)
                 }
                 if let error = meeting.videoError { Text("Video: \(error)").foregroundStyle(.red) }
-                if let warning = meeting.videoWarning { Text("Video: \(warning)").foregroundStyle(.red) }
+                if let warning = meeting.videoWarning {
+                    HStack(spacing: 4) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Theme.Colors.warn)
+                        Text("Video: \(warning)")
+                            .foregroundStyle(Theme.Colors.ink2)
+                        Button {
+                            meeting.videoWarning = nil
+                            try? modelContext.save()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Theme.Colors.ink3)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }.font(Theme.Typography.caption)
         }
     }
@@ -858,6 +882,93 @@ struct MeetingDetailView: View {
         .controlSize(.small)
         .padding(.horizontal, Theme.Metrics.pad)
         .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var audioQualityBar: some View {
+        let isCleaning = recordingManager.audioCleaningMeetingIDs.contains(meeting.id)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                if isCleaning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Scanning & cleaning audio…")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.ink2)
+                    }
+                } else if let report = meeting.audioQualityReport {
+                    Picker("Audio Track", selection: Binding(
+                        get: { meeting.useCleanedAudio },
+                        set: {
+                            meeting.useCleanedAudio = $0
+                            try? modelContext.save()
+                        }
+                    )) {
+                        Text("Cleaned").tag(true)
+                        Text("Original").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 140)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showAudioQualityInspector.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "waveform.badge.magnifyingglass")
+                                .foregroundStyle(meeting.useCleanedAudio ? Theme.Colors.accent : Theme.Colors.ink2)
+                            Text(report.summaryText)
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.ink)
+                            Image(systemName: showAudioQualityInspector ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Theme.Colors.ink3)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(showAudioQualityInspector ? Theme.Colors.accent.opacity(0.12) : Theme.Colors.chip)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Button {
+                        Task {
+                            await recordingManager.cleanMeetingAudio(meeting)
+                        }
+                    } label: {
+                        Label("Re-clean", systemImage: "arrow.triangle.2.circlepath")
+                            .font(Theme.Typography.caption)
+                    }
+                    .buttonStyle(.borderless)
+                } else {
+                    Button {
+                        Task {
+                            await recordingManager.cleanMeetingAudio(meeting)
+                        }
+                    } label: {
+                        Label("Scan & Clean Audio", systemImage: "waveform.badge.magnifyingglass")
+                            .font(Theme.Typography.caption)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                    Spacer()
+                }
+            }
+
+            if showAudioQualityInspector, let report = meeting.audioQualityReport {
+                AudioQualityInspectorCard(report: report)
+            }
+        }
+        .padding(.horizontal, Theme.Metrics.pad)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Report tab (Summary + Coaching)
@@ -1447,18 +1558,38 @@ struct MeetingDetailView: View {
         // Two separate tracks were recorded: system audio ("Them") and the mic
         // ("Me"). Load both so playback contains the full conversation, not just
         // the other side.
-        if let path = meeting.systemAudioPath.nilIfEmpty,
+        if let path = meeting.effectiveSystemAudioPath,
            FileManager.default.fileExists(atPath: path) {
             audioPlayer = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
             audioPlayer?.enableRate = true
             audioPlayer?.prepareToPlay()
+        } else {
+            audioPlayer = nil
         }
-        if let micPath = meeting.micAudioPath?.nilIfEmpty,
+        if let micPath = meeting.effectiveMicAudioPath,
            FileManager.default.fileExists(atPath: micPath) {
             micPlayer = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: micPath))
             micPlayer?.enableRate = true
             micPlayer?.prepareToPlay()
             micLevel = 1
+        } else {
+            micPlayer = nil
+        }
+    }
+
+    private func reloadAudioPlayersPreservingPosition() {
+        let currentPos = playbackTime
+        let wasPlaying = isPlaying
+        if wasPlaying {
+            audioPlayer?.pause()
+            micPlayer?.pause()
+        }
+        prepareAudioPlayer()
+        audioPlayer?.currentTime = min(currentPos, audioPlayer?.duration ?? currentPos)
+        micPlayer?.currentTime = min(currentPos, micPlayer?.duration ?? currentPos)
+        updateMicLevel()
+        if wasPlaying {
+            startSynced()
         }
     }
 
@@ -2452,5 +2583,107 @@ enum TranscriptItem: Identifiable {
         }
         out.append(contentsOf: marks.map { .bookmark($0) })
         return out
+    }
+}
+
+// MARK: - Audio Quality Inspector Card
+
+struct AudioQualityInspectorCard: View {
+    let report: AudioQualityReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Audio Quality Report")
+                    .font(Theme.Typography.sectionLabel)
+                    .foregroundStyle(Theme.Colors.ink)
+                Spacer()
+                Text("Analyzed in \(report.elapsedMs) ms")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.ink3)
+            }
+
+            if !report.anomalies.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Detected & Resolved Issues")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.ink2)
+                    ForEach(report.anomalies, id: \.id) { anomaly in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: anomaly.fixed ? "checkmark.circle.fill" : "info.circle.fill")
+                                .foregroundStyle(anomaly.fixed ? Theme.Colors.good : Theme.Colors.ink2)
+                                .font(.system(size: 12))
+                            Text("\(anomaly.track): \(anomaly.detail)")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.ink)
+                        }
+                    }
+                }
+            }
+
+            if !report.tracks.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Track Metrics")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.ink2)
+                    ForEach(report.tracks, id: \.track) { track in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(track.track)
+                                .font(Theme.Typography.mono(11))
+                                .bold()
+                                .foregroundStyle(Theme.Colors.ink)
+                            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 2) {
+                                GridRow {
+                                    Text("Speech Level:")
+                                        .font(Theme.Typography.caption)
+                                        .foregroundStyle(Theme.Colors.ink3)
+                                    Text(String(format: "%.1f → %.1f dBFS", track.speechRMSdBFSBefore, track.speechRMSdBFSAfter))
+                                        .font(Theme.Typography.mono(11))
+                                        .foregroundStyle(Theme.Colors.ink)
+                                    Text("Peak:")
+                                        .font(Theme.Typography.caption)
+                                        .foregroundStyle(Theme.Colors.ink3)
+                                    Text(String(format: "%.1f → %.1f dBFS", track.peakdBFSBefore, track.peakdBFSAfter))
+                                        .font(Theme.Typography.mono(11))
+                                        .foregroundStyle(Theme.Colors.ink)
+                                }
+                                GridRow {
+                                    Text("Noise Floor:")
+                                        .font(Theme.Typography.caption)
+                                        .foregroundStyle(Theme.Colors.ink3)
+                                    Text(String(format: "%.1f → %.1f dBFS", track.noiseFloordBFSBefore, track.noiseFloordBFSAfter))
+                                        .font(Theme.Typography.mono(11))
+                                        .foregroundStyle(Theme.Colors.ink)
+                                    if track.clickCount > 0 {
+                                        Text("Clicks removed:")
+                                            .font(Theme.Typography.caption)
+                                            .foregroundStyle(Theme.Colors.ink3)
+                                        Text("\(track.clickCount)")
+                                            .font(Theme.Typography.mono(11))
+                                            .foregroundStyle(Theme.Colors.ink)
+                                    } else if let hum = track.humFrequencyHz {
+                                        Text("Hum notch:")
+                                            .font(Theme.Typography.caption)
+                                            .foregroundStyle(Theme.Colors.ink3)
+                                        Text("\(hum) Hz")
+                                            .font(Theme.Typography.mono(11))
+                                            .foregroundStyle(Theme.Colors.ink)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(6)
+                        .background(Theme.Colors.chip)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Theme.Colors.panel)
+                .stroke(Theme.Colors.line, lineWidth: 1)
+        )
     }
 }

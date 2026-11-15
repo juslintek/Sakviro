@@ -199,10 +199,12 @@ final class SystemAudioTap {
                 deallocator: nil),
               source.frameLength > 0 else { return }
 
+        var hadDiscontinuity = false
         if time.mFlags.contains(.sampleTimeValid) {
             if nextSampleTime >= 0, time.mSampleTime > nextSampleTime + 1 {
                 lostSeconds += (time.mSampleTime - nextSampleTime) / sourceFormat.sampleRate
                 lostGaps += 1
+                hadDiscontinuity = true
                 // ponytail: first few, then every 100th, so a bad call can't flood the log.
                 if lostGaps <= 5 || lostGaps % 100 == 0 {
                     AudioCaptureManager.oslog.log("system tap skipped audio: \(self.lostGaps, privacy: .public) gaps, \(self.lostSeconds, format: .fixed(precision: 3), privacy: .public) s lost so far")
@@ -231,6 +233,18 @@ final class SystemAudioTap {
             return source
         }
         guard error == nil, converted.frameLength > 0, let onBuffer else { return }
+
+        if hadDiscontinuity, let channels = converted.floatChannelData {
+            let fadeFrames = min(Int(converted.frameLength), max(1, Int(targetFormat.sampleRate * 0.004)))
+            for c in 0..<Int(targetFormat.channelCount) {
+                let channel = channels[c]
+                for n in 0..<fadeFrames {
+                    let gain = Float(0.5 * (1.0 - cos(Double.pi * Double(n) / Double(fadeFrames))))
+                    channel[n] *= gain
+                }
+            }
+        }
+
         deliveryQueue.async { onBuffer(converted) }
     }
 

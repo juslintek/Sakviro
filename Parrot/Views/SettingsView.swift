@@ -72,6 +72,9 @@ struct SettingsView: View {
     }
     @AppStorage(VideoCaptureService.enabledKey) private var recordVideo = false
     @AppStorage(VideoArchivePreset.defaultsKey) private var videoArchivePreset = VideoArchivePreset.efficient1080p15.rawValue
+    @AppStorage(VideoCaptureTargetMode.defaultsKey) private var videoCaptureTarget = VideoCaptureTargetMode.any.rawValue
+    @AppStorage(VideoCaptureService.showsCursorKey) private var videoShowsCursor = true
+    @AppStorage(AudioQualityCleaner.autoCleanKey) private var autoCleanAudio = true
     @AppStorage("echoCancellationEnabled") private var echoCancellation = true
     @AppStorage("polishAfterCall") private var polishAfterCall = false
     @AppStorage("livePreview") private var livePreview = true
@@ -315,6 +318,15 @@ struct SettingsView: View {
                 )
             }
 
+            SettingsCard(title: "Audio Quality") {
+                SettingsToggleRow(
+                    title: "Auto-clean audio after calls",
+                    detail: "Scans and removes rumble, hum, clicks, hiss, and quiet-mic imbalance while keeping originals.",
+                    first: true,
+                    isOn: $autoCleanAudio
+                )
+            }
+
             SettingsCard(title: "Input") {
                 SettingsRow(first: true) {
                     Hint("System audio comes from macOS; the microphone uses your default input device. Video is captured only when enabled and you choose a window or display.")
@@ -329,6 +341,16 @@ struct SettingsView: View {
                     isOn: $recordVideo
                 )
                 if recordVideo {
+                    SettingsLabeledRow(title: "Capture target", detail: "Window, application, or full display to record.") {
+                        Picker("Capture target", selection: $videoCaptureTarget) {
+                            ForEach(VideoCaptureTargetMode.allCases) { mode in
+                                Text(mode.label).tag(mode.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
                     SettingsLabeledRow(title: "Video quality", detail: "Lower resolution and frame rate keep your Mac cool during long calls.") {
                         Picker("Video quality", selection: $videoArchivePreset) {
                             ForEach(VideoArchivePreset.allCases) { preset in
@@ -339,6 +361,11 @@ struct SettingsView: View {
                         .pickerStyle(.menu)
                         .fixedSize()
                     }
+                    SettingsToggleRow(
+                        title: "Show pointer in video",
+                        detail: "Include the mouse pointer in captured recordings.",
+                        isOn: $videoShowsCursor
+                    )
                 }
             }
 

@@ -34,7 +34,7 @@ extension RecordingManager {
         let meetings = (try? modelContext.fetch(FetchDescriptor<Meeting>())) ?? []
         let items = meetings.map {
             Retention.Item(id: $0.id, date: $0.importedAt ?? $0.date,
-                           hasAudio: $0.systemAudioPath.nilIfEmpty != nil || $0.micAudioPath?.nilIfEmpty != nil || $0.videoPath != nil || $0.rawVideoPath != nil,
+                           hasAudio: $0.systemAudioPath.nilIfEmpty != nil || $0.micAudioPath?.nilIfEmpty != nil || $0.videoPath != nil || $0.rawVideoPath != nil || $0.cleanedSystemAudioPath?.nilIfEmpty != nil || $0.cleanedMicAudioPath?.nilIfEmpty != nil,
                            finished: $0.status == .done || $0.status == .failed)
         }
         let due = Retention.due(items, now: now, audioDays: audioDays, meetingDays: meetingDays)
@@ -45,7 +45,13 @@ extension RecordingManager {
         }
         for id in due.audio {
             guard let m = byID[id] else { continue }
-            for path in [m.systemAudioPath.nilIfEmpty, m.micAudioPath?.nilIfEmpty].compactMap({ $0 }) {
+            let audioPaths = [
+                m.systemAudioPath.nilIfEmpty,
+                m.micAudioPath?.nilIfEmpty,
+                m.cleanedSystemAudioPath?.nilIfEmpty,
+                m.cleanedMicAudioPath?.nilIfEmpty
+            ].compactMap({ $0 })
+            for path in audioPaths {
                 try? FileManager.default.removeItem(atPath: path)
             }
             for path in [m.videoPath, m.rawVideoPath] {
@@ -57,6 +63,9 @@ extension RecordingManager {
             m.videoWarning = nil
             m.systemAudioPath = ""
             m.micAudioPath = nil
+            m.cleanedSystemAudioPath = nil
+            m.cleanedMicAudioPath = nil
+            m.audioQualityReportData = nil
         }
         if !due.audio.isEmpty { try? modelContext.save() }
         if !due.audio.isEmpty || !due.meetings.isEmpty {

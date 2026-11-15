@@ -17,6 +17,7 @@ struct DashboardView: View {
     @State private var showImporter = false
     @State private var screenMode: SessionMode?
     @AppStorage("copilotEnabled") private var copilotEnabled = false
+    @AppStorage(VideoCaptureTargetMode.defaultsKey) private var videoCaptureTarget = VideoCaptureTargetMode.any.rawValue
     /// The same setting as Settings → Transcription → Language and the live
     /// "switch to Turkish" banner, shown where a recording starts.
     @AppStorage(TranscriptionLanguage.defaultsKey) private var callLanguage = "auto"
@@ -123,6 +124,8 @@ struct DashboardView: View {
             Button("Record meeting with screen analysis") { screenMode = .meeting }
                 .disabled(recordingManager.isRecording || !copilotEnabled || !recordingManager.transcriptionEngine.isReady)
 
+            captureTargetPicker
+
             languagePicker
 
             importButton
@@ -186,6 +189,26 @@ struct DashboardView: View {
             .padding(.horizontal, 2)
         }
         .frame(maxWidth: 460)
+    }
+
+    private var captureTargetPicker: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "macwindow")
+                .font(.appCaption)
+                .foregroundStyle(Theme.Colors.ink2)
+            Text("Capture target")
+                .font(Theme.Typography.secondary)
+                .foregroundStyle(Theme.Colors.ink2)
+            Picker("", selection: $videoCaptureTarget) {
+                ForEach(VideoCaptureTargetMode.allCases) { mode in
+                    Text(mode.label).tag(mode.rawValue)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+        .padding(.top, 2)
     }
 
     /// Picking the call's language up front means nothing to detect: the

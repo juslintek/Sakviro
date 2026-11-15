@@ -18,6 +18,7 @@ struct MenuBarView: View {
     /// say) the item turns into a standing "say hi".
     @AppStorage("menuBarFollowClicked") private var followClicked = false
     @AppStorage("floatingWidgetAutoShow") private var floatingWidgetAutoShow = true
+    @AppStorage(VideoCaptureTargetMode.defaultsKey) private var videoCaptureTarget = VideoCaptureTargetMode.any.rawValue
 
     private static var newestFirst: FetchDescriptor<Meeting> {
         var descriptor = FetchDescriptor<Meeting>(sortBy: [SortDescriptor(\.date, order: .reverse)])
@@ -83,6 +84,7 @@ struct MenuBarView: View {
                 .keyboardShortcut("r")
                 .disabled(!recordingManager.transcriptionEngine.isReady)
             profilePicker
+            captureTargetPicker
 
             Button(FloatingAssistantWidgetController.shared.isVisible ? "Hide Floating Assistant" : "Show Floating Assistant") {
                 FloatingAssistantWidgetController.shared.toggle(recordingManager: recordingManager)
@@ -166,6 +168,17 @@ struct MenuBarView: View {
             }
             .pickerStyle(.menu)
         }
+    }
+
+    /// Target mode for video/screen capture before recording begins.
+    @ViewBuilder private var captureTargetPicker: some View {
+        let currentMode = VideoCaptureTargetMode(rawValue: videoCaptureTarget) ?? .any
+        Picker("Capture: \(currentMode.label)", selection: $videoCaptureTarget) {
+            ForEach(VideoCaptureTargetMode.allCases) { mode in
+                Text(mode.label).tag(mode.rawValue)
+            }
+        }
+        .pickerStyle(.menu)
     }
 
     /// The latest meeting: open its report, or copy it to paste elsewhere.

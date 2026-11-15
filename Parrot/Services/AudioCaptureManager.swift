@@ -113,6 +113,47 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
+    /// 2nd-order 80 Hz Butterworth high-pass filter to reject rumble, desk thumps,
+    /// plosives, and DC offset in real-time.
+    struct BiquadHPF {
+        private var b0: Float = 1
+        private var b1: Float = 0
+        private var b2: Float = 0
+        private var a1: Float = 0
+        private var a2: Float = 0
+        private var z1: Float = 0
+        private var z2: Float = 0
+
+        init(cutoff: Double = 80.0, sampleRate: Double = 16000.0) {
+            reset(cutoff: cutoff, sampleRate: sampleRate)
+        }
+
+        mutating func reset(cutoff: Double = 80.0, sampleRate: Double = 16000.0) {
+            let w0 = 2.0 * Double.pi * cutoff / sampleRate
+            let cosW0 = cos(w0)
+            let sinW0 = sin(w0)
+            let alpha = sinW0 / (2.0 * (1.0 / sqrt(2.0)))
+            let a0 = 1.0 + alpha
+            b0 = Float(((1.0 + cosW0) / 2.0) / a0)
+            b1 = Float((-(1.0 + cosW0)) / a0)
+            b2 = Float(((1.0 + cosW0) / 2.0) / a0)
+            a1 = Float((-2.0 * cosW0) / a0)
+            a2 = Float((1.0 - alpha) / a0)
+            z1 = 0
+            z2 = 0
+        }
+
+        mutating func processInPlace(_ samples: inout [Float]) {
+            for i in 0..<samples.count {
+                let x = samples[i]
+                let y = b0 * x + z1
+                z1 = b1 * x - a1 * y + z2
+                z2 = b2 * x - a2 * y
+                samples[i] = y
+            }
+        }
+    }
+
     /// Detects the OS silently cutting the mic feed (issue #12): a call app that
     /// grabs the microphone (Safari/Zoom voice processing) makes CoreAudio deliver
     /// exact digital zeros to every other client — the engine keeps running and no
@@ -151,6 +192,8 @@ final class AudioCaptureManager: NSObject {
     @ObservationIgnored private var micWatchdog = MicSignalWatchdog()
     /// Main thread only — collapses the per-buffer verdicts into one pending retry.
     @ObservationIgnored private var micRecoveryScheduled = false
+    @ObservationIgnored private var micHPF = BiquadHPF()
+    private(set) var firstAudioSampleUptime: TimeInterval = 0
 
     private(set) var isCapturing = false
     private(set) var systemAudioURL: URL?
@@ -268,7 +311,14 @@ final class AudioCaptureManager: NSObject {
 
         // Echo cancellation on by default (defeats speaker bleed without headphones).
         let aecEnabled = UserDefaults.standard.object(forKey: "echoCancellationEnabled") as? Bool ?? true
-        echoCanceller = aecEnabled ? EchoCanceller() : nil
+        if aecEnabled && !Self.defaultOutputIsHeadphones() {
+            echoCanceller = EchoCanceller()
+        } else {
+            echoCanceller = nil
+            if aecEnabled {
+                NSLog("Parrot: headphone output detected (\(outputDeviceName)) — bypassing speaker AEC to preserve clean voice")
+            }
+        }
         aecDump = nil
         if Self.aecDumpEnabled, let echoCanceller, let dump = AECDump(dir: storageDir, timestamp: timestamp) {
             aecDump = dump
@@ -276,8 +326,10 @@ final class AudioCaptureManager: NSObject {
             Self.oslog.log("aec dump: aec-mic_\(timestamp, privacy: .public).caf + aec-ref_\(timestamp, privacy: .public).caf")
         }
 
-        // Reset the mic watchdog before any tap can fire.
+        // Reset the mic watchdog and HPF before any tap can fire.
         micWatchdog = MicSignalWatchdog()
+        micHPF.reset()
+        firstAudioSampleUptime = 0
         lastAlignmentLogAt = .distantPast
         micSignalLost = false
         micRecoveryScheduled = false
@@ -596,12 +648,13 @@ final class AudioCaptureManager: NSObject {
                 // Echo-cancel the mic using the system audio as reference. With AEC
                 // off, this returns the mic unchanged. With it on, it returns cleaned
                 // 10 ms frames (possibly empty until a frame fills) — fail-safe.
-                let micFloats = Self.floats(from: convertedBuffer)
+                var micFloats = Self.floats(from: convertedBuffer)
                 let rawMean = Self.meanAbs(micFloats)
                 // Watch the RAW mic, pre-AEC: the canceller legitimately emits
                 // empty/quiet frames, but only the OS produces exact zeros.
                 let verdict = self.micWatchdog.observe(meanAbs: rawMean, at: Date())
                 if verdict != .ok { self.handleMicWatchdog(verdict) }
+                self.micHPF.processInPlace(&micFloats)
                 let cleaned = Self.micOut(self.echoCanceller?.process(mic: micFloats) ?? micFloats,
                                           muted: self.micMuted)
                 // #98: the canceller only removes echo that lands within its
@@ -747,6 +800,11 @@ final class AudioCaptureManager: NSObject {
     /// the recording clock. Never to the echo canceller or level meters: a burst
     /// of padding would push the AEC reference seconds out of step with the mic.
     private func emit(_ buffer: AVAudioPCMBuffer, to stream: AudioStream, ownsBuffer: Bool = false) {
+        if systemFramesOut == 0 && micFramesOut == 0 {
+            if firstAudioSampleUptime == 0 {
+                firstAudioSampleUptime = ProcessInfo.processInfo.systemUptime
+            }
+        }
         let source: AudioSource = stream == .system ? .them : .me
         let rate = buffer.format.sampleRate
         var out = stream == .system ? systemFramesOut : micFramesOut
@@ -760,6 +818,7 @@ final class AudioCaptureManager: NSObject {
         if owed >= Int(rate / 4) {
             Self.oslog.log("\(name, privacy: .public) audio \(Double(owed) / rate, format: .fixed(precision: 2), privacy: .public) s behind the recording clock — padding silence")
         }
+        let hadGap = owed > 0
         // One-second pieces: a streaming transcriber gets socket-sized frames.
         while owed > 0, let silence = AVAudioPCMBuffer(pcmFormat: buffer.format,
                                                        frameCapacity: AVAudioFrameCount(min(owed, Int(rate)))) {
@@ -771,6 +830,18 @@ final class AudioCaptureManager: NSObject {
             onAudioBuffer?(silence, source)
             owed -= Int(silence.frameLength)
             out += Int(silence.frameLength)
+        }
+        if hadGap, let channels = buffer.floatChannelData {
+            let fadeFrames = min(80, Int(buffer.frameLength / 4))
+            if fadeFrames > 0 {
+                for c in 0..<Int(buffer.format.channelCount) {
+                    let channel = channels[c]
+                    for n in 0..<fadeFrames {
+                        let gain = Float(0.5 * (1.0 - cos(Double.pi * Double(n) / Double(fadeFrames))))
+                        channel[n] *= gain
+                    }
+                }
+            }
         }
         appendAudio(buffer, to: stream, ownsBuffer: ownsBuffer)
         onAudioBuffer?(buffer, source)
@@ -916,6 +987,42 @@ final class AudioCaptureManager: NSObject {
         return name as String
     }
 
+    static func defaultOutputTransportType() -> UInt32? {
+        guard let deviceID = defaultDeviceID(input: false) else { return nil }
+        var transportType: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &transportType) == noErr else { return nil }
+        return transportType
+    }
+
+    static func isHeadphoneOutput(deviceName: String, transportType: UInt32? = nil) -> Bool {
+        let lower = deviceName.lowercased()
+        if lower.contains("speaker") {
+            return false
+        }
+        if let transportType,
+           (transportType == kAudioDeviceTransportTypeBluetooth || transportType == kAudioDeviceTransportTypeBluetoothLE) {
+            return true
+        }
+        let keywords = [
+            "airpods", "headphones", "headset", "earpods", "buds", "beats",
+            "wh-1000", "wf-1000", "qc35", "qc45", "quietcomfort", "momentum",
+            "arctis", "jabra"
+        ]
+        return keywords.contains { lower.contains($0) }
+    }
+
+    static func defaultOutputIsHeadphones() -> Bool {
+        let name = defaultDeviceName(input: false)
+        let transport = defaultOutputTransportType()
+        return isHeadphoneOutput(deviceName: name, transportType: transport)
+    }
+
     // MARK: - Buffer helpers
 
     /// Mean absolute sample value — the same "energy" measure the transcription
@@ -1002,12 +1109,13 @@ extension CMSampleBuffer {
         guard let avFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: asbd.pointee.mSampleRate,
-            channels: AVAudioChannelCount(asbd.pointee.mChannelsPerFrame),
+            channels: 1,
             interleaved: false
         ) else { return nil }
 
         let frameCount = CMSampleBufferGetNumSamples(self)
-        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+        guard frameCount > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
             return nil
         }
         pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
@@ -1019,9 +1127,47 @@ extension CMSampleBuffer {
 
         guard let data = dataPointer, let channelData = pcmBuffer.floatChannelData else { return nil }
 
-        // Copy audio data — handle float32 format
-        let byteCount = min(length, Int(pcmBuffer.frameCapacity) * MemoryLayout<Float>.size)
-        memcpy(channelData[0], data, byteCount)
+        let chCount = Int(asbd.pointee.mChannelsPerFrame)
+        let isInterleaved = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+        let isFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0 || asbd.pointee.mBitsPerChannel == 32
+
+        if chCount > 1 && isInterleaved {
+            if isFloat {
+                let maxFrames = min(frameCount, length / (chCount * MemoryLayout<Float>.size))
+                data.withMemoryRebound(to: Float.self, capacity: length / MemoryLayout<Float>.size) { ptr in
+                    for i in 0..<maxFrames {
+                        var sum: Float = 0
+                        let base = i * chCount
+                        for c in 0..<chCount { sum += ptr[base + c] }
+                        channelData[0][i] = sum / Float(chCount)
+                    }
+                }
+            } else {
+                let maxFrames = min(frameCount, length / (chCount * MemoryLayout<Int16>.size))
+                data.withMemoryRebound(to: Int16.self, capacity: length / MemoryLayout<Int16>.size) { ptr in
+                    for i in 0..<maxFrames {
+                        var sum: Float = 0
+                        let base = i * chCount
+                        for c in 0..<chCount { sum += Float(ptr[base + c]) }
+                        channelData[0][i] = (sum / Float(chCount)) / 32768.0
+                    }
+                }
+            }
+        } else if isFloat {
+            let maxFrames = min(frameCount, length / MemoryLayout<Float>.size)
+            data.withMemoryRebound(to: Float.self, capacity: length / MemoryLayout<Float>.size) { ptr in
+                for i in 0..<maxFrames {
+                    channelData[0][i] = ptr[i]
+                }
+            }
+        } else {
+            let maxFrames = min(frameCount, length / MemoryLayout<Int16>.size)
+            data.withMemoryRebound(to: Int16.self, capacity: length / MemoryLayout<Int16>.size) { ptr in
+                for i in 0..<maxFrames {
+                    channelData[0][i] = Float(ptr[i]) / 32768.0
+                }
+            }
+        }
 
         return pcmBuffer
     }

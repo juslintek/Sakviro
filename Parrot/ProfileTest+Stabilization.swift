@@ -1,6 +1,10 @@
 import Foundation
 import AppKit
 import SwiftData
+import AVFoundation
+import CoreAudio
+import CoreMedia
+import ScreenCaptureKit
 
 extension ProfileTest {
     @MainActor
@@ -216,5 +220,241 @@ extension ProfileTest {
 
         manager.clearTranscriptionLog(for: logMid)
         check("manager: clearTranscriptionLog clears entries", manager.transcriptionLogs[logMid] == nil)
+
+        // 7. Audio Cleanup & Video Capture Stabilization
+        testAudioCleanupAndVideoCapture()
+    }
+
+    @MainActor
+    static func testAudioCleanupAndVideoCapture() {
+        // 1. AudioQualityCleaner.processBuffer Multi-Anomaly Detection & Cleanup
+        let sampleRate: Double = 16000
+        let sampleCount = 64_000
+        var sig = [Float](repeating: 0, count: sampleCount)
+        for i in 0..<sampleCount {
+            let t = Double(i) / sampleRate
+            var val: Double = 0.045 // DC offset
+            val += 0.025 * sin(2.0 * Double.pi * 50.0 * t) // 50 Hz mains hum
+            val += 0.035 * sin(2.0 * Double.pi * 35.0 * t) // 35 Hz rumble
+            // Quiet voiced bursts: 0.5s..1.5s and 2.2s..3.5s (~ -31 dBFS speech)
+            if (t >= 0.5 && t < 1.5) || (t >= 2.2 && t < 3.5) {
+                val += 0.022 * sin(2.0 * Double.pi * 220.0 * t) + 0.012 * sin(2.0 * Double.pi * 440.0 * t)
+            }
+            sig[i] = Float(val)
+        }
+        // 3 sharp 1-sample click spikes
+        sig[12_000] = 0.78
+        sig[24_000] = 0.78
+        sig[41_000] = 0.78
+
+        // 1 clipped plateau (6 samples of 0.995 starting at index 16_500)
+        for i in 16_500..<16_506 {
+            sig[i] = 0.995
+        }
+
+        // Hard-zero dropout gap (200 exact zeros at 43_000..<43_200 bordered by 0.08 samples)
+        sig[42_999] = 0.08
+        for i in 43_000..<43_200 {
+            sig[i] = 0.0
+        }
+        sig[43_200] = 0.08
+
+        let out = AudioQualityCleaner.processBuffer(sig, sampleRate: sampleRate, trackLabel: "Microphone")
+        check("audio quality: buffer length preserved and finite", out.cleaned.count == sig.count && out.cleaned.allSatisfy(\.isFinite))
+        let kinds = Set(out.findings.map(\.kind))
+        check("audio quality: detects dcOffset", kinds.contains(.dcOffset))
+        check("audio quality: detects mainsHum at 50Hz", kinds.contains(.mainsHum) && out.metrics.humFrequencyHz == 50)
+        check("audio quality: detects clicksAndPops", kinds.contains(.clicksAndPops) && out.metrics.clickCount >= 3)
+        check("audio quality: detects clipping", kinds.contains(.clipping) && out.metrics.clippedSamples >= 5)
+        check("audio quality: detects lowLoudness", kinds.contains(.lowLoudness))
+
+        let residualDC = abs(out.cleaned.reduce(0, +) / Float(out.cleaned.count))
+        check("audio quality: residual DC offset < 0.002", residualDC < 0.002)
+        check("audio quality: speech loudness leveled up", out.metrics.speechRMSdBFSAfter > out.metrics.speechRMSdBFSBefore + 5.0)
+        let peakAfter = out.cleaned.map(abs).max() ?? 0
+        check("audio quality: limiter ceiling respected", out.metrics.peakdBFSAfter <= -0.8 && peakAfter <= 0.92)
+
+        // 2. AudioQualityCleaner.cleanMeetingTracks + Meeting Effective Paths + AudioFileLoader 48kHz Stereo Support
+        let audioTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("parrot-audio-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: audioTempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: audioTempDir) }
+
+        let stereoURL = audioTempDir.appendingPathComponent("stereo48k.caf")
+        do {
+            guard let format48kStereo = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false) else {
+                fatalError("Failed to create 48k stereo format")
+            }
+            let file = try AVAudioFile(forWriting: stereoURL, settings: format48kStereo.settings)
+            guard let buf = AVAudioPCMBuffer(pcmFormat: format48kStereo, frameCapacity: 96_000) else {
+                fatalError("Failed to allocate 48k stereo buffer")
+            }
+            buf.frameLength = 96_000
+            for ch in 0..<2 {
+                if let ptr = buf.floatChannelData?[ch] {
+                    for i in 0..<96_000 {
+                        let t = Double(i) / 48000.0
+                        ptr[i] = Float(0.04 * sin(2.0 * Double.pi * (ch == 0 ? 440.0 : 880.0) * t))
+                    }
+                }
+            }
+            try file.write(from: buf)
+        } catch {
+            check("audio file write stereo: no throw", false)
+        }
+
+        let loadedSamples = try? AudioFileLoader.load16kMono(url: stereoURL)
+        check("audio file loader: 48k stereo loaded as ~32k 16kHz mono", loadedSamples != nil && abs((loadedSamples?.count ?? 0) - 32_000) <= 200)
+
+        let cleanResult = try? AudioQualityCleaner.cleanMeetingTracks(systemPath: stereoURL.path, micPath: nil)
+        let cleanSysPath = cleanResult?.cleanedSystemPath
+        let cleanExists = cleanSysPath != nil && FileManager.default.fileExists(atPath: cleanSysPath!)
+        var cleanLength: AVAudioFramePosition = 0
+        var cleanRate: Double = 0
+        if let cleanSysPath, cleanExists, let cleanFile = try? AVAudioFile(forReading: URL(fileURLWithPath: cleanSysPath)) {
+            cleanLength = cleanFile.length
+            cleanRate = cleanFile.processingFormat.sampleRate
+        }
+        check("audio quality cleanMeetingTracks: .cleaned.caf exists with 96k frames at 48kHz", cleanExists && cleanLength == 96_000 && cleanRate == 48000.0)
+
+        let testMeeting = Meeting(title: "Cleanup Track Test", systemAudioPath: stereoURL.path)
+        testMeeting.cleanedSystemAudioPath = cleanSysPath
+        testMeeting.useCleanedAudio = true
+        check("meeting effectiveSystemAudioPath: cleaned audio used when enabled", testMeeting.effectiveSystemAudioPath == cleanSysPath)
+        testMeeting.useCleanedAudio = false
+        check("meeting effectiveSystemAudioPath: original audio used when disabled", testMeeting.effectiveSystemAudioPath == stereoURL.path)
+
+        // 3. AudioCaptureManager.isHeadphoneOutput
+        check("headphone output: AirPods Pro", AudioCaptureManager.isHeadphoneOutput(deviceName: "AirPods Pro"))
+        check("headphone output: External Headphones", AudioCaptureManager.isHeadphoneOutput(deviceName: "External Headphones"))
+        check("headphone output: Bluetooth transport", AudioCaptureManager.isHeadphoneOutput(deviceName: "Generic Bluetooth Device", transportType: kAudioDeviceTransportTypeBluetooth))
+        check("headphone output: MacBook Pro Speakers is false", !AudioCaptureManager.isHeadphoneOutput(deviceName: "MacBook Pro Speakers"))
+        check("headphone output: Studio Display Speakers is false", !AudioCaptureManager.isHeadphoneOutput(deviceName: "Studio Display Speakers"))
+
+        // 4. VideoCaptureService Target Modes, 16px Alignment, Benign Stream Errors & remuxReplacingAudio
+        check("video capture mode: any has 3 picker modes", VideoCaptureTargetMode.any.pickerModes == [.singleWindow, .singleApplication, .singleDisplay])
+        check("video capture mode: application has 1 picker mode", VideoCaptureTargetMode.application.pickerModes == [.singleApplication])
+
+        check("video dimension aligned: 1137 % 16 == 0", VideoCaptureService.alignedDimension(1137) % 16 == 0)
+        check("video dimension aligned: 743 % 16 == 0", VideoCaptureService.alignedDimension(743) % 16 == 0)
+        check("video dimension aligned: 4 clamped to 16", VideoCaptureService.alignedDimension(4) == 16)
+
+        let benignErr = NSError(domain: "com.apple.ScreenCaptureKit", code: -3808, userInfo: [NSLocalizedDescriptionKey: "Failed to stop a stream that is already stopped or does not exist"])
+        check("video stream error: isBenignStreamStopError for -3808", VideoCaptureService.isBenignStreamStopError(benignErr))
+        let targetClosedErr1 = NSError(domain: "com.apple.ScreenCaptureKit", code: -3817, userInfo: nil)
+        let targetClosedErr2 = NSError(domain: "com.apple.ScreenCaptureKit", code: -3807, userInfo: nil)
+        check("video stream error: isTargetClosedStopError for -3817 and -3807", VideoCaptureService.isTargetClosedStopError(targetClosedErr1) && VideoCaptureService.isTargetClosedStopError(targetClosedErr2))
+
+        // Video mux & remuxReplacingAudio test
+        let videoTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("parrot-video-mux-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: videoTempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: videoTempDir) }
+
+        let rawMP4 = videoTempDir.appendingPathComponent("raw.mp4")
+        let a1CAF = videoTempDir.appendingPathComponent("sys.caf")
+        let a2CAF = videoTempDir.appendingPathComponent("mic.caf")
+        let replCAF = videoTempDir.appendingPathComponent("repl.caf")
+        let muxedMP4 = videoTempDir.appendingPathComponent("muxed.mp4")
+
+        do {
+            try writeSyntheticVideo(url: rawMP4, width: 160, height: 160, duration: 1.0)
+            try writeSyntheticAudio(url: a1CAF, sampleRate: 48000, channels: 1, frames: 48000, freq: 440.0)
+            try writeSyntheticAudio(url: a2CAF, sampleRate: 48000, channels: 1, frames: 48000, freq: 880.0)
+            try writeSyntheticAudio(url: replCAF, sampleRate: 48000, channels: 1, frames: 48000, freq: 660.0)
+        } catch {
+            check("video synthetic assets: created without error", false)
+        }
+
+        let muxSem = DispatchSemaphore(value: 0)
+        var remuxThrew = false
+        var loadedVTracks = 0
+        var loadedATracks = 0
+        var fileSize: Int64 = 0
+
+        Task {
+            do {
+                try await VideoCaptureService.mux(video: rawMP4, offset: 0, audio: [a1CAF, a2CAF], destination: muxedMP4)
+                try await VideoCaptureService.remuxReplacingAudio(videoFile: muxedMP4, offset: 0, audio: [replCAF])
+                let asset = AVURLAsset(url: muxedMP4)
+                let v = try await asset.loadTracks(withMediaType: .video)
+                let a = try await asset.loadTracks(withMediaType: .audio)
+                loadedVTracks = v.count
+                loadedATracks = a.count
+                let attrs = try FileManager.default.attributesOfItem(atPath: muxedMP4.path)
+                fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            } catch {
+                remuxThrew = true
+            }
+            muxSem.signal()
+        }
+        while muxSem.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: .now + 0.01) }
+
+        check("video remux: executed without error", !remuxThrew)
+        check("video remux: output file exists and is non-empty", FileManager.default.fileExists(atPath: muxedMP4.path) && fileSize > 0)
+        check("video remux: loads both video and audio tracks", loadedVTracks >= 1 && loadedATracks >= 1)
+    }
+
+    private static func writeSyntheticVideo(url: URL, width: Int = 160, height: Int = 160, duration: Double = 1.0) throws {
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ]
+        )
+        guard writer.canAdd(input) else { throw NSError(domain: "VideoGen", code: -1) }
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? NSError(domain: "VideoGen", code: -2) }
+        writer.startSession(atSourceTime: .zero)
+
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, nil, &pixelBuffer)
+        guard status == kCVReturnSuccess, let pb = pixelBuffer else {
+            throw NSError(domain: "VideoGen", code: -3)
+        }
+
+        let fps = 10
+        let totalFrames = Int(duration * Double(fps))
+        for f in 0..<totalFrames {
+            let pts = CMTime(value: CMTimeValue(f), timescale: CMTimeScale(fps))
+            while !input.isReadyForMoreMediaData {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            adaptor.append(pb, withPresentationTime: pts)
+        }
+        input.markAsFinished()
+        let sem = DispatchSemaphore(value: 0)
+        writer.finishWriting { sem.signal() }
+        while sem.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: .now + 0.01) }
+    }
+
+    private static func writeSyntheticAudio(url: URL, sampleRate: Double, channels: Int, frames: Int, freq: Double) throws {
+        try? FileManager.default.removeItem(at: url)
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false) else {
+            throw NSError(domain: "AudioGen", code: -1)
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
+            throw NSError(domain: "AudioGen", code: -2)
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for c in 0..<channels {
+            if let ptr = buffer.floatChannelData?[c] {
+                for i in 0..<frames {
+                    let t = Double(i) / sampleRate
+                    ptr[i] = Float(0.04 * sin(2.0 * Double.pi * freq * t))
+                }
+            }
+        }
+        try file.write(from: buffer)
     }
 }
+

@@ -1,4 +1,6 @@
 import Foundation
+import AVFoundation
+import WhisperKit
 
 struct TranscriptionLogEntry: Identifiable, Equatable, Sendable {
     enum Kind: String, Equatable, Sendable {
@@ -812,20 +814,17 @@ enum TranscriptPolisher {
 enum AudioFileLoader {
     enum LoadError: Error { case unsupportedFormat }
 
-    // ponytail: fast path only — our recordings are written as 16 kHz mono by
-    // construction; the rare non-16k system track (already surfaced by the
-    // echo-canceller notice) skips polish rather than growing a converter loop.
     static func load16kMono(url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
         guard format.sampleRate == 16000, format.channelCount == 1 else {
-            throw LoadError.unsupportedFormat
+            return AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
         }
         var samples: [Float] = []
         samples.reserveCapacity(Int(file.length))
         let block: AVAudioFrameCount = 1 << 18
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: block) else {
-            throw LoadError.unsupportedFormat
+            return AudioProcessor.convertBufferToArray(buffer: try AudioProcessor.loadAudio(fromPath: url.path))
         }
         while file.framePosition < file.length {
             try file.read(into: buffer, frameCount: block)

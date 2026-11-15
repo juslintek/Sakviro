@@ -33,6 +33,11 @@ final class Meeting {
     var videoOffset: TimeInterval = 0
     var videoError: String? = nil
     var videoWarning: String? = nil
+    var cleanedSystemAudioPath: String? = nil
+    var cleanedMicAudioPath: String? = nil
+    var useCleanedAudio: Bool = true
+    var audioQualityReportData: Data? = nil
+    var videoTargetSummary: String? = nil
     // Older stores have no value here. A required Codable enum traps when SwiftData saves those rows.
     var sessionMode: SessionMode? = SessionMode.meeting
     var status: MeetingStatus
@@ -231,6 +236,43 @@ final class Meeting {
     var previousReport: PreviousReport? {
         get { previousReportData.flatMap { try? JSONDecoder().decode(PreviousReport.self, from: $0) } }
         set { previousReportData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
+    var audioQualityReport: AudioQualityReport? {
+        get { audioQualityReportData.flatMap { try? JSONDecoder().decode(AudioQualityReport.self, from: $0) } }
+        set { audioQualityReportData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
+    var hasCleanedAudio: Bool {
+        if let cleanSys = cleanedSystemAudioPath?.nilIfEmpty, FileManager.default.fileExists(atPath: cleanSys) {
+            return true
+        }
+        if let cleanMic = cleanedMicAudioPath?.nilIfEmpty, FileManager.default.fileExists(atPath: cleanMic) {
+            return true
+        }
+        return false
+    }
+
+    var effectiveSystemAudioPath: String? {
+        if useCleanedAudio,
+           let clean = cleanedSystemAudioPath?.nilIfEmpty,
+           FileManager.default.fileExists(atPath: clean) {
+            return clean
+        }
+        return systemAudioPath.nilIfEmpty
+    }
+
+    var effectiveMicAudioPath: String? {
+        if useCleanedAudio,
+           let clean = cleanedMicAudioPath?.nilIfEmpty,
+           FileManager.default.fileExists(atPath: clean) {
+            return clean
+        }
+        return micAudioPath?.nilIfEmpty
+    }
+
+    var effectiveAudioPaths: [String] {
+        [effectiveSystemAudioPath, effectiveMicAudioPath].compactMap { $0 }
     }
 
     /// Me's share of the speaking time, nil when nobody spoke. Seconds, not

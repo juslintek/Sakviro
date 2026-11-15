@@ -63,6 +63,9 @@ final class RecordingManager {
     /// Meetings whose About was asked for this launch: one try each.
     private var aboutTried: Set<UUID> = []
 
+    var audioCleaningMeetingIDs: Set<UUID> = []
+    var activeVideoTargetSummary: String? = nil
+
     var transcriptionJobs: [UUID: TranscriptionJobProgress] = [:]
     var completedRetranscribeIDs: Set<UUID> = []
     var transcriptionErrors: [UUID: String] = [:]
@@ -483,9 +486,14 @@ final class RecordingManager {
         var videoFilter: SCContentFilter?
         if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
             let capture = VideoCaptureService()
-            guard let filter = try await capture.chooseSource(windowOnly: mode == .screenOnly || useScreen) else { return }
-            videoFilter = filter
-            videoCapture = capture
+            if let filter = try await capture.chooseSource(mode: .current) {
+                videoFilter = filter
+                videoCapture = capture
+            } else {
+                if mode == .screenOnly || useScreen { return }
+                videoFilter = nil
+                videoCapture = nil
+            }
         }
 
         if mode == .screenOnly || useScreen { try requireScreenAnalysis(profile: profile) }
@@ -494,6 +502,16 @@ final class RecordingManager {
         let meeting = Meeting()
         meeting.sessionMode = mode
         if mode == .screenOnly { meeting.title = "Screen session" }
+        if let capture = videoCapture, videoFilter != nil {
+            activeVideoTargetSummary = capture.targetSummary
+            meeting.videoTargetSummary = capture.targetSummary
+            capture.onTargetChanged = { [weak self, weak meeting] newSummary in
+                Task { @MainActor in
+                    self?.activeVideoTargetSummary = newSummary
+                    meeting?.videoTargetSummary = newSummary
+                }
+            }
+        }
         modelContext.insert(meeting)
 
         // Persist active profile/brief/snapshot onto the meeting
@@ -592,6 +610,7 @@ final class RecordingManager {
                         self.updateScreenPolicy(meeting: meeting, session: session)
                     }
                 }
+                updateScreenPolicy(meeting: meeting, session: session)
 
             }
             capture.onError = { [weak self, weak meeting, weak capture] message in
@@ -752,6 +771,8 @@ final class RecordingManager {
         isStopping = true
         defer { isStopping = false }
 
+        activeVideoTargetSummary = nil
+
         timer?.invalidate()
         timer = nil
         NudgePillController.shared.hide()
@@ -774,7 +795,16 @@ final class RecordingManager {
         screenSettingsObserver = nil
         let screenOnly = currentMeeting?.sessionMode == .screenOnly
         if !screenOnly { await audioCaptureManager.stopCapture() }
+
+        if let meeting = currentMeeting, !screenOnly, AudioQualityCleaner.isAutoCleanEnabled {
+            await cleanMeetingAudio(meeting, remuxVideoIfPresent: false)
+        }
+
         if let capture = videoCapture, let meeting = currentMeeting {
+            if !screenOnly {
+                capture.updateAudioOriginIfNeeded(audioCaptureManager.firstAudioSampleUptime)
+            }
+            let earlyNote = capture.stoppedEarlyNote
             do {
                 if screenArchive {
                     let (url, offset) = try await capture.stop()
@@ -797,6 +827,9 @@ final class RecordingManager {
                 meeting.videoWarning = reason
             } catch {
                 meeting.videoError = error.localizedDescription
+            }
+            if earlyNote != nil && meeting.videoError == nil {
+                meeting.videoWarning = earlyNote
             }
             videoCapture = nil
         }
@@ -960,6 +993,10 @@ final class RecordingManager {
         let startedAt = Date()
         transcriptionLogs[meeting.id] = []
 
+        if AudioQualityCleaner.isAutoCleanEnabled {
+            await cleanMeetingAudio(meeting, remuxVideoIfPresent: false)
+        }
+
         let modelName = transcriptionEngine.currentModel ?? UserDefaults.standard.string(forKey: "whisperModel") ?? "base"
         let effectiveLang = MLXTranscriber.isMLX(modelName)
             ? MLXTranscriber.effectiveLanguage(for: modelName, selected: TranscriptionLanguage.selected)
@@ -1079,8 +1116,9 @@ final class RecordingManager {
                 ),
                 for: meeting.id
             )
+            let transcribeURL = meeting.effectiveSystemAudioPath.map { URL(fileURLWithPath: $0) } ?? audioURL
             let results = try await transcriptionEngine.transcribeFile(
-                url: audioURL,
+                url: transcribeURL,
                 trackLabel: audioURL.lastPathComponent,
                 onProgress: onChunkProgress,
                 onTrace: traceCallback
@@ -1191,37 +1229,87 @@ final class RecordingManager {
     }
 
     func retryVideoMux(_ meeting: Meeting) async {
-        guard let raw = VideoCaptureService.ownedURL(meeting.rawVideoPath), let modelContext else { return }
-        let destination = AudioCaptureManager.storageDirectory().appendingPathComponent("video_\(UUID().uuidString).mp4")
-        let audio = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty]
-            .compactMap { $0 }.map { URL(fileURLWithPath: $0) }
-        let previousVideoPath = meeting.videoPath
+        guard let modelContext else { return }
+        if let raw = VideoCaptureService.ownedURL(meeting.rawVideoPath) {
+            let destination = AudioCaptureManager.storageDirectory().appendingPathComponent("video_\(UUID().uuidString).mp4")
+            let audio = meeting.effectiveAudioPaths.map { URL(fileURLWithPath: $0) }
+            let previousVideoPath = meeting.videoPath
+            do {
+                try modelContext.save()
+                try await VideoCaptureService.mux(video: raw, offset: meeting.videoOffset, audio: audio, destination: destination)
+                meeting.videoPath = destination.path
+                meeting.videoError = nil
+                meeting.videoWarning = nil
+                do {
+                    try modelContext.save()
+                } catch {
+                    meeting.videoPath = previousVideoPath
+                    throw error
+                }
+                meeting.rawVideoPath = nil
+                do {
+                    try modelContext.save()
+                    try FileManager.default.removeItem(at: raw)
+                } catch {
+                    meeting.rawVideoPath = raw.path
+                    meeting.videoWarning = "Video saved, but the original could not be removed: \(error.localizedDescription)"
+                    try modelContext.save()
+                }
+                if let previous = VideoCaptureService.ownedURL(previousVideoPath), previous != raw {
+                    try FileManager.default.removeItem(at: previous)
+                }
+            } catch {
+                meeting.videoError = error.localizedDescription
+            }
+        } else if let vPath = meeting.videoPath?.nilIfEmpty,
+                  let videoURL = VideoCaptureService.ownedURL(vPath),
+                  FileManager.default.fileExists(atPath: videoURL.path) {
+            let audio = meeting.effectiveAudioPaths.map { URL(fileURLWithPath: $0) }
+            do {
+                try await VideoCaptureService.remuxReplacingAudio(videoFile: videoURL, offset: meeting.videoOffset, audio: audio)
+                meeting.videoError = nil
+                meeting.videoWarning = nil
+                try? modelContext.save()
+            } catch {
+                meeting.videoError = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    func changeVideoTarget() {
+        videoCapture?.presentChangeTargetPicker()
+    }
+
+    @MainActor
+    func cleanMeetingAudio(_ meeting: Meeting, remuxVideoIfPresent: Bool = true) async {
+        guard !audioCleaningMeetingIDs.contains(meeting.id) else { return }
+        audioCleaningMeetingIDs.insert(meeting.id)
+        defer { audioCleaningMeetingIDs.remove(meeting.id) }
+
+        let sys = meeting.systemAudioPath.nilIfEmpty
+        let mic = meeting.micAudioPath?.nilIfEmpty
+        guard sys != nil || mic != nil else { return }
+
         do {
-            try modelContext.save()
-            try await VideoCaptureService.mux(video: raw, offset: meeting.videoOffset, audio: audio, destination: destination)
-            meeting.videoPath = destination.path
-            meeting.videoError = nil
-            meeting.videoWarning = nil
-            do {
-                try modelContext.save()
-            } catch {
-                meeting.videoPath = previousVideoPath
-                throw error
-            }
-            meeting.rawVideoPath = nil
-            do {
-                try modelContext.save()
-                try FileManager.default.removeItem(at: raw)
-            } catch {
-                meeting.rawVideoPath = raw.path
-                meeting.videoWarning = "Video saved, but the original could not be removed: \(error.localizedDescription)"
-                try modelContext.save()
-            }
-            if let previous = VideoCaptureService.ownedURL(previousVideoPath), previous != raw {
-                try FileManager.default.removeItem(at: previous)
+            let result = try await Task.detached(priority: .userInitiated) {
+                try AudioQualityCleaner.cleanMeetingTracks(systemPath: sys, micPath: mic)
+            }.value
+
+            meeting.cleanedSystemAudioPath = result.cleanedSystemPath
+            meeting.cleanedMicAudioPath = result.cleanedMicPath
+            meeting.audioQualityReport = result.report
+            meeting.useCleanedAudio = true
+            try? modelContext?.save()
+
+            if remuxVideoIfPresent,
+               let vPath = meeting.videoPath?.nilIfEmpty,
+               FileManager.default.fileExists(atPath: vPath) {
+                let audio = meeting.effectiveAudioPaths.map { URL(fileURLWithPath: $0) }
+                try? await VideoCaptureService.remuxReplacingAudio(videoFile: URL(fileURLWithPath: vPath), offset: meeting.videoOffset, audio: audio)
             }
         } catch {
-            meeting.videoError = error.localizedDescription
+            NSLog("Parrot: audio cleaning failed for meeting \(meeting.id): \(error.localizedDescription)")
         }
     }
 
@@ -1247,7 +1335,7 @@ final class RecordingManager {
             deletionFailure = "This meeting is still being processed. Try deleting it when processing finishes."
             return false
         }
-        let audioPaths = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty].compactMap { $0 }
+        let audioPaths = [meeting.systemAudioPath.nilIfEmpty, meeting.micAudioPath?.nilIfEmpty, meeting.cleanedSystemAudioPath?.nilIfEmpty, meeting.cleanedMicAudioPath?.nilIfEmpty].compactMap { $0 }
         let videoURLs = [meeting.videoPath, meeting.rawVideoPath].compactMap(VideoCaptureService.ownedURL)
         do {
             // Keep pending edits if deletion fails and needs a rollback.

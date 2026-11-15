@@ -98,6 +98,8 @@ final class EchoCanceller {
         if let preprocess, let echoState {
             _ = speex_preprocess_ctl(preprocess, SPEEX_PREPROCESS_SET_ECHO_STATE,
                                      UnsafeMutableRawPointer(echoState))
+            var noiseSuppress: Int32 = -8
+            _ = speex_preprocess_ctl(preprocess, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress)
         }
     }
 

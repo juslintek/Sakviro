@@ -101,7 +101,24 @@ struct LiveRecordingView: View {
                     .foregroundStyle(Theme.Colors.stop)
             }
 
-            if recordingManager.isWatchingSelectedWindow {
+            if let target = recordingManager.activeVideoTargetSummary {
+                HStack(spacing: 5) {
+                    Image(systemName: "rectangle.inset.filled.and.person.filled")
+                        .font(.system(size: 11))
+                    Text(target)
+                        .font(Theme.Typography.caption)
+                        .lineLimit(1)
+                    Button("Change…") {
+                        recordingManager.changeVideoTarget()
+                    }
+                    .font(Theme.Typography.caption)
+                    .buttonStyle(.borderless)
+                }
+                .foregroundStyle(Theme.Colors.ink2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Theme.Colors.chip, in: RoundedRectangle(cornerRadius: 4))
+            } else if recordingManager.isWatchingSelectedWindow {
                 Label("Selected window", systemImage: "macwindow")
                     .font(Theme.Typography.secondary)
                     .foregroundStyle(Theme.Colors.ink2)
