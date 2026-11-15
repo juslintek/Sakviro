@@ -3,7 +3,7 @@
 The separate local build keeps its own app data and does not update from the upstream Parrot feed. Build it with:
 
 ```sh
-make VERSION=0.29.9-sakviro2 SIGN_IDENTITY=-
+make VERSION=0.29.12-sakviro3 SIGN_IDENTITY=-
 ```
 
 The fork uses `main` for its own work. Keep upstream Parrot history and attribution, and bring upstream changes into the fork before applying Sakviro commits on top; inspect changes and conflicts before integrating.

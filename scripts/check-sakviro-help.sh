@@ -24,6 +24,7 @@ assert before == {p: hashlib.sha256(p.read_bytes()).digest() for p in sources}
 PY
 python3 - "$app" <<'PY'
 from pathlib import Path
+from html import unescape
 import plistlib
 import re
 import sys
@@ -34,14 +35,16 @@ pages = book / 'Contents/Resources/en.lproj'
 index = (pages / 'index.html').read_text()
 privacy = (pages / 'privacy.html').read_text()
 setup = (pages / 'copilot-setup.html').read_text()
-assert all(value in index for value in ('Sakviro Help', 'CLI account', 'selected window', 'audio goes'))
-assert all(value in privacy for value in ('CLI accounts:', 'selected-window frames', 'Cloud polish sends audio', 'on-device-only mode blocks'))
-assert 'never uploaded\n  anywhere by anything' not in privacy
-assert 'signed-in CLI account' in setup
+plain = lambda html: re.sub(r'\s+', ' ', unescape(re.sub(r'<[^>]+>', ' ', html))).strip()
+index_text, privacy_text, setup_text = map(plain, (index, privacy, setup))
+assert all(value in index_text for value in ('Sakviro Help', 'Audio, transcription and transcript polish stay on your Mac', 'signed-in assistant CLI connections', 'receive meeting text and relevant context', 'frames from your selected window'))
+assert all(value in privacy_text for value in ('Audio recordings are saved on your Mac', 'backups or file sharing can copy them elsewhere', 'Transcription and transcript polish run with on-device models', 'Meeting text, matched knowledge base snippets', 'selected-window images can go too', 'not the whole video recording', 'Account connections are held, including requests with images', 'webhooks are blocked'))
+assert 'never uploaded anywhere by anything' not in privacy_text
+assert all(value in setup_text for value in ('sign in through that CLI', 'Gemini and custom CLI connections support text only', 'Images are sent only when screen context is allowed', 'Audio, transcription and transcript polish stay on this Mac', 'account connections stay selected but are held'))
 assert 'href="https://github.com/turantekin/Parrot"' in index
 source = Path('docs/help/privacy.html').read_text()
 assert re.findall(r'<code>.*?</code>', source, re.S) == re.findall(r'<code>.*?</code>', privacy, re.S)
-assert all(value in privacy for value in ('TypeSafe AI', 'Calendar invites', 'Webhook:'))
+assert all(value in privacy for value in ('Calendar invites', 'Webhook:'))
 with (book / 'Contents/Info.plist').open('rb') as plist:
     metadata = plistlib.load(plist)
 with (app / 'Contents/Info.plist').open('rb') as plist:

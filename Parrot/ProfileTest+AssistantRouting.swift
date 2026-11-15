@@ -50,6 +50,22 @@ extension ProfileTest {
         check("assistant routing: private route excludes prior online success", state.candidates([.ollama], images: false, now: now) == [.ollama])
         state.failed(.codex, now: now)
         check("assistant routing: unavailable image routes fail closed", state.candidates(enabled, images: true, now: now).isEmpty)
+        check("assistant routing: Gemini and Antigravity cannot receive images", !AssistantRoutingSettings.supportsImages(.gemini))
+        check("assistant routing: Antigravity fails closed", (try? CLIAnalysisProvider.checkSupportedExecutable(.gemini, executable: "@agy")) == nil)
+        check("assistant routing: Antigravity path fails closed", (try? CLIAnalysisProvider.checkSupportedExecutable(.gemini, executable: "/path/agy")) == nil)
+        check("assistant routing: Gemini command remains supported", (try? CLIAnalysisProvider.checkSupportedExecutable(.gemini, executable: "@gemini")) != nil)
+        check("assistant routing: Gemini CLI remains supported", (try? CLIAnalysisProvider.checkSupportedExecutable(.gemini, executable: "/usr/local/bin/gemini")) != nil)
+        let arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var overridden = arguments
+        overridden["cli_gemini_path"] = ""
+        UserDefaults.standard.setVolatileDomain(overridden, forName: UserDefaults.argumentDomain)
+        check("assistant routing: Gemini defaults to native CLI", CLIAnalysisProvider.executable(.gemini) == "@gemini")
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        check("assistant routing: Gemini model tiers", ModelSelection.defaults(.gemini) == ["flash-lite", "flash", "pro"])
+        let modelContext = ModelTaskContext(task: .live)
+        check("assistant routing: Gemini manual selection preserved", ModelSelection.selected(kind: .gemini, manual: "selected-model", context: modelContext, defaults: defaults) == "selected-model")
+        defaults.set(true, forKey: ModelSelection.key(.gemini, "enabled"))
+        check("assistant routing: Gemini auto selection uses native tiers", ModelSelection.selected(kind: .gemini, manual: "selected-model", context: modelContext, defaults: defaults) == "flash-lite")
 
         for provider in ["claudeCode", "codex", "gemini", "copilot", "customCLI", "assistantIntegrations"] {
             var usage = AIUsage()

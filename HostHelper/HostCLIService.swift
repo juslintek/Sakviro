@@ -50,6 +50,9 @@ final class HostCLIService {
               !requestedExecutable.contains("\0"), arguments.allSatisfy({ !$0.contains("\0") }) else {
             throw failure("Invalid CLI configuration or executable not found.")
         }
+        if object["preset"] as? String == "antigravity" {
+            throw failure("Antigravity is unavailable because its CLI cannot be verified to disable tools, hooks and MCP servers.")
+        }
         guard let account = getpwuid(getuid()), let homePointer = account.pointee.pw_dir else {
             throw failure("Could not determine the account home directory.")
         }
@@ -75,7 +78,6 @@ final class HostCLIService {
         let outcome = Result { () throws -> Data in
         var processArguments = arguments
         var processInput = input
-        var validatedJPEG: Data?
         if let encoded = object["jpeg"] {
             guard let base64 = encoded as? String, base64.utf8.count <= 682_668,
                   let jpeg = Data(base64Encoded: base64), !jpeg.isEmpty, jpeg.count <= 512_000,
@@ -89,7 +91,6 @@ final class HostCLIService {
                   CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
                 throw failure("Invalid screen JPEG.")
             }
-            validatedJPEG = jpeg
             switch object["preset"] as? String {
             case "claudeCode":
                 let message: [String: Any] = ["type": "user", "message": ["role": "user", "content": [
@@ -105,27 +106,8 @@ final class HostCLIService {
                     guard processArguments.last == "-" else { throw failure("Invalid Codex attachment configuration.") }
                     processArguments.insert(contentsOf: ["--image", attachment.path], at: processArguments.count - 1)
                 } else { processArguments += ["--attachment", attachment.path] }
-            case "antigravity":
-                break
             default: throw failure("This CLI cannot accept screen images.")
             }
-        }
-        if object["preset"] as? String == "antigravity", processArguments.contains("stream-json") {
-            if !processArguments.contains("--settings") {
-                processArguments += ["--settings", "{}"]
-            }
-            let envelope: [String: Any]
-            if let validatedJPEG, !validatedJPEG.isEmpty {
-                let messageContent: [[String: Any]] = [
-                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": validatedJPEG.base64EncodedString()]],
-                    ["type": "text", "text": input]
-                ]
-                envelope = ["event": "user", "message": ["content": messageContent]]
-            } else {
-                envelope = ["event": "user", "message": ["content": input]]
-            }
-            let stdinData = try JSONSerialization.data(withJSONObject: envelope)
-            processInput = String(decoding: stdinData, as: UTF8.self) + "\n"
         }
         var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
         guard pipe(&inputPipe) == 0, pipe(&outputPipe) == 0, pipe(&errorPipe) == 0 else { throw failure("Could not create CLI pipes.") }

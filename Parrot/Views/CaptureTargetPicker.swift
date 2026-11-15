@@ -728,13 +728,6 @@ extension VideoCaptureService {
             }
         }
 
-        if let display = content.displays.first {
-            let filter = SCContentFilter(display: display, excludingApplications: sakviroApps, exceptingWindows: sakviroWindows)
-            let summary = "Screen · \(display.width)×\(display.height)"
-            await applySelectedTarget(summary: summary)
-            return filter
-        }
-
         return nil
     }
 }

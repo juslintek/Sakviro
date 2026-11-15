@@ -85,6 +85,15 @@ for path in Path(sys.argv[1]).glob('*.html'):
         output = ''.join(parser.parts)
     else:
         if path.name == 'privacy.html':
+            original = replace_once(original, '''  <li>Audio recordings. They are written to your disk and never uploaded
+  anywhere by anything, ever. No exceptions, no telemetry, no accounts.</li>''', '''  <li>Audio recordings are saved on your Mac. Your own backups or file sharing
+  can copy them elsewhere.</li>''')
+            original = replace_once(original, '''  context is supported and allowed, selected-window images can go too. Audio
+  stays on this Mac. Automatic fallback can use another enabled connection.</li>''', '''  context is supported and allowed, selected-window images can go too, but
+  not the whole video recording. Audio stays on this Mac. Automatic fallback
+  can use another enabled connection.</li>''')
+            original = replace_once(original, '''  and reports. Account connections are held and webhooks are blocked.''', '''  and reports. Account connections are held, including requests with images,
+  and webhooks are blocked.''')
             start = original.index('  <li><strong>Update check:</strong>')
             end = original.index('</li>', start) + len('</li>')
             original = original[:start] + '  <li><strong>Updates:</strong> Automatic update checks are disabled in this build.</li>' + original[end:]

@@ -83,6 +83,22 @@ jobs:
           tests/video-mux/check.sh
           swiftc -parse-as-library Parrot/Services/ScreenContext.swift Parrot/Services/VideoCaptureService.swift tests/ScreenSamplerCheck.swift -o /tmp/screen-sampler-check
           /tmp/screen-sampler-check
+          ffmpeg -v error -f lavfi -i 'color=c=blue:s=64x64:r=10:d=3' -c:v libx264 -pix_fmt yuv420p /tmp/inline-player-fixture.mp4
+          swiftc -parse-as-library Parrot/Views/InlineVideoPlayer.swift tests/check-inline-player.swift -o /tmp/inline-player-check
+          /tmp/inline-player-check /tmp/inline-player-fixture.mp4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Audio, helper and Help checks
+        run: |
+          python3 tests/check-audio-conversion.py
+          python3 tests/check-audio-tail.py
+          python3 tests/check-mlx-lifecycle.py
+          python3 HostHelper/Resources/test_mlx_worker.py
+          make test-host-cli
+          scripts/check-sakviro-help.sh
 
       - name: Snapshot renders
         run: |
@@ -116,7 +132,7 @@ jobs:
       - name: Test build (release, ad-hoc)
         if: github.event_name != 'pull_request'
         run: |
-          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.29.9-sakviro2-ci
+          make bundle CONFIG=release SIGN_IDENTITY=- VERSION=0.29.12-sakviro3-ci
           ditto dist/Parrot.app "$RUNNER_TEMP/Sakviro.app"
           ditto -c -k --keepParent "$RUNNER_TEMP/Sakviro.app" Sakviro-test.zip
           test -s Sakviro-test.zip

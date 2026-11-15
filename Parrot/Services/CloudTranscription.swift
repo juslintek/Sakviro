@@ -546,6 +546,7 @@ enum TranscriptPolisher {
         micPath: String?,
         language: String?,
         apiKey: String,
+        strictTracks: Bool = false,
         timeline: ([Float]) async -> [Float]? = { _ in nil },
         onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil,
         onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil
@@ -554,6 +555,7 @@ enum TranscriptPolisher {
         return try await polish(
             systemPath: systemPath,
             micPath: micPath,
+            strictTracks: strictTracks,
             timeline: timeline,
             onProgress: onProgress,
             onTrace: onTrace
@@ -695,6 +697,7 @@ enum TranscriptPolisher {
     static func polish(
         systemPath: String?,
         micPath: String?,
+        strictTracks: Bool = false,
         timeline: ([Float]) async -> [Float]? = { _ in nil },
         onProgress: (@Sendable (_ trackLabel: String, _ completedSeconds: Double, _ totalSeconds: Double, _ overallFraction: Double) -> Void)? = nil,
         onTrace: (@Sendable (TranscriptionLogEntry) -> Void)? = nil,
@@ -713,9 +716,16 @@ enum TranscriptPolisher {
             (systemPath, "Them", "System audio"),
             (micPath, "Me", "Microphone")
         ] {
-            guard let path, FileManager.default.fileExists(atPath: path) else { continue }
+            guard let path else { continue }
+            if !strictTracks && !FileManager.default.fileExists(atPath: path) { continue }
             let url = URL(fileURLWithPath: path)
-            guard let samples = try? AudioFileLoader.load16kMono(url: url) else {
+            let samples: [Float]
+            do {
+                samples = try AudioFileLoader.load16kMono(url: url)
+            } catch {
+                if strictTracks {
+                    throw NSError(domain: "Parrot", code: 5, userInfo: [NSLocalizedDescriptionKey: "Cannot read \(label) at \(path): \(error.localizedDescription)", NSUnderlyingErrorKey: error])
+                }
                 NSLog("Parrot: polish skipped \(speaker) track — unsupported format")
                 continue
             }

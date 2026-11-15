@@ -18,12 +18,8 @@ final class AudioCaptureManager: NSObject {
     // queue, off the audio render thread.
     private var systemAudioFile: AVAudioFile?
     private var micAudioFile: AVAudioFile?
-    /// Set true before stopCapture's sync barriers. A straggler write block that
-    /// was enqueued after the barriers must not lazily recreate an AVAudioFile on
-    /// the finished URL — AVAudioFile(forWriting:) truncates, destroying the
-    /// recording, and the stale file object would hijack the NEXT recording's
-    /// audio. Plain Bool across threads, same accepted pattern as `isCapturing`.
-    private var filesClosed = true
+    private var systemFileClosed = true
+    private var micFileClosed = true
     private let systemWriteQueue = DispatchQueue(label: "com.uygar.parrot.audio.system")
     private let micWriteQueue = DispatchQueue(label: "com.uygar.parrot.audio.mic")
     /// Acoustic echo canceller, created per recording when enabled. Removes the
@@ -335,7 +331,8 @@ final class AudioCaptureManager: NSObject {
         micRecoveryScheduled = false
         tapEverHadSignal = false
 
-        filesClosed = false  // fresh URLs above; queues are idle, so no race
+        systemWriteQueue.sync { systemFileClosed = false }
+        micWriteQueue.sync { micFileClosed = false }
 
         let t0 = ProcessInfo.processInfo.systemUptime
         captureOrigin = t0
@@ -400,14 +397,14 @@ final class AudioCaptureManager: NSObject {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
 
-        // Flush queued writes, then close the files. AVAudioFile finalizes the
-        // .caf header when it deallocates; the sync barrier guarantees every
-        // pending write has landed first. filesClosed goes up BEFORE the
-        // barriers so any write block enqueued after them no-ops instead of
-        // recreating (= truncating) the finished file.
-        filesClosed = true
-        systemWriteQueue.sync { systemAudioFile = nil }
-        micWriteQueue.sync { micAudioFile = nil }
+        systemWriteQueue.sync {
+            systemFileClosed = true
+            systemAudioFile = nil
+        }
+        micWriteQueue.sync {
+            micFileClosed = true
+            micAudioFile = nil
+        }
         aecDump?.close()
         aecDump = nil
 
@@ -860,7 +857,7 @@ final class AudioCaptureManager: NSObject {
         guard let url else { return }
 
         queue.async { [weak self] in
-            guard let self, !self.filesClosed else { return }
+            guard let self, !(stream == .system ? self.systemFileClosed : self.micFileClosed) else { return }
             do {
                 let file: AVAudioFile
                 if stream == .system {

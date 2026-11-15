@@ -83,7 +83,7 @@ struct AssistantIntegrationsView: View {
         switch kind {
         case .claudeCode: URL(string: "https://code.claude.com/docs/en/quickstart")
         case .codex: URL(string: "https://developers.openai.com/codex/auth/")
-        case .gemini: URL(string: "https://antigravity.google")
+        case .gemini: URL(string: "https://geminicli.com/docs/get-started/authentication/")
         case .copilot: URL(string: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli")
         case .ollama: OllamaInstaller.websiteURL
         default: nil
@@ -94,7 +94,7 @@ struct AssistantIntegrationsView: View {
         switch kind {
         case .claudeCode: "Claude / Claude Code"
         case .codex: "ChatGPT / Codex"
-        case .gemini: "Antigravity / Gemini CLI"
+        case .gemini: "Gemini CLI"
         default: kind.label
         }
     }
@@ -103,7 +103,7 @@ struct AssistantIntegrationsView: View {
         switch kind {
         case .claudeCode: "Uses your signed-in Claude Code CLI. Supports meeting text and selected-window images."
         case .codex: "Uses Codex CLI with your ChatGPT account. Supports meeting text and selected-window images."
-        case .gemini: "Uses your signed-in Antigravity or Gemini CLI. Supports meeting text and selected-window images with Antigravity."
+        case .gemini: "Uses your signed-in Gemini CLI for meeting text. Screen analysis is unavailable with this connection."
         case .copilot: "Uses your signed-in GitHub Copilot CLI. Supports meeting text and selected-window images."
         case .customCLI: "Use a trusted local CLI executable. This connection supports text only."
         case .custom: "Connects to any OpenAI-compatible API or Google AI Studio. Supports meeting text and selected-window images."

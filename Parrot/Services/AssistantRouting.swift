@@ -83,9 +83,7 @@ final class AssistantRoutingProvider: AnalysisProvider {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         AssistantRoutingSettings.migrate(in: defaults)
-        self.state = AssistantRouteState { kind in
-            kind == .gemini ? CLIAnalysisProvider.isAntigravityConfigured(in: defaults) : AssistantRoutingSettings.supportsImages(kind)
-        }
+        self.state = AssistantRouteState()
         var providers: [CopilotProviderKind: AnalysisProvider] = [
             .ollama: OpenAICompatibleProvider { .ollama },
             .custom: OpenAICompatibleProvider { .custom }

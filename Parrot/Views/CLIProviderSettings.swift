@@ -46,6 +46,9 @@ struct CLIProviderSettings: View {
         ProviderModelSettings(model: $model, kind: kind)
             .onChange(of: model) { _, _ in checkMessage = "" }
         ProviderAutoModelSettings(kind: kind, manual: $model)
+        if kind == .gemini {
+            SettingsRow { Hint("Use a model available to your Gemini CLI account. Antigravity and its model IDs are not supported; select a Gemini CLI model if a saved ID fails.") }
+        }
         SettingsRow {
             Hint("Meeting text is sent to the CLI account's service. Check confirms executable; Test Live Prompt confirms sign-in and model.")
         }
@@ -58,6 +61,7 @@ struct CLIProviderSettings: View {
         let executable = CLIAnalysisProvider.executable(kind)
         guard !executable.isEmpty else { checkMessage = "Set an absolute executable path."; return }
         do {
+            try CLIAnalysisProvider.checkSupportedExecutable(kind, executable: executable)
             let identifier = UUID().uuidString
             let request: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
                                           "arguments": ["--version"], "input": "", "timeout": 10.0]
@@ -90,7 +94,7 @@ struct ProviderModelSettings: View {
         case .claude: [ClaudeAnalysisProvider.defaultModel, "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"]
         case .claudeCode: ["sonnet", "opus", "haiku", "fable", "best"]
         case .codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]
-        case .gemini: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-argon-low"]
+        case .gemini: ["auto", "flash", "flash-lite", "pro"]
         case .copilot: ["auto", "gpt-5.4"]
         default: []
         }

@@ -33,24 +33,14 @@ final class CLIAnalysisProvider: AnalysisProvider {
         switch kind {
         case .claudeCode: return "@claude"
         case .codex: return "@codex"
-        case .gemini: return "@agy"
+        case .gemini: return "@gemini"
         case .copilot: return "@copilot"
         default: return ""
         }
     }
 
-    static func isAntigravityConfigured(in defaults: UserDefaults = .standard) -> Bool {
-        let raw = (defaults.string(forKey: "cli_gemini_path") ?? defaults.string(forKey: "cli_gemini_command") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw == "@agy" || raw == "agy" || raw.hasSuffix("/agy") { return true }
-        if raw.isEmpty {
-            let home = NSHomeDirectory()
-            let paths = ["\(home)/.local/bin/agy", "/opt/homebrew/bin/agy", "/usr/local/bin/agy", "/usr/bin/agy"]
-            return paths.contains { FileManager.default.isExecutableFile(atPath: $0) }
-        }
-        return false
-    }
-
     static func checkExecutable(_ kind: CopilotProviderKind) async throws {
+        try checkSupportedExecutable(kind, executable: executable(kind))
         let identifier = UUID().uuidString
         let request: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable(kind),
                                       "arguments": ["--version"], "input": "", "timeout": 10.0]
@@ -58,7 +48,17 @@ final class CLIAnalysisProvider: AnalysisProvider {
         try Task.checkCancellation()
     }
 
-    var isConfigured: Bool { !Self.executable(kindSource()).isEmpty }
+    static func checkSupportedExecutable(_ kind: CopilotProviderKind, executable: String) throws {
+        if kind == .gemini && (executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy") {
+            throw AnalysisError.badResponse("Antigravity is unavailable because its CLI cannot be verified to disable tools, hooks and MCP servers. Select a supported CLI in Settings.")
+        }
+    }
+
+    var isConfigured: Bool {
+        let kind = kindSource()
+        let executable = Self.executable(kind)
+        return !executable.isEmpty && (try? Self.checkSupportedExecutable(kind, executable: executable)) != nil
+    }
     var usageTotals: AITokenTotals { lock.lock(); defer { lock.unlock() }; return totals }
     var usageModel: String? {
         lock.lock(); defer { lock.unlock() }
@@ -121,6 +121,7 @@ final class CLIAnalysisProvider: AnalysisProvider {
     private func call(system: String, user: String, schema: String? = nil, jpeg: Data? = nil, context: ModelTaskContext) async throws -> String {
         let kind = kindSource()
         let executable = Self.executable(kind)
+        try Self.checkSupportedExecutable(kind, executable: executable)
         let manual = Self.setting(kind, "model").trimmingCharacters(in: .whitespacesAndNewlines)
         let model = ModelSelection.selected(kind: kind, manual: manual, context: context)
         var arguments: [String]
@@ -152,29 +153,18 @@ final class CLIAnalysisProvider: AnalysisProvider {
                          "--log-level", "none", "--output-format", "json"]
             if !model.isEmpty { arguments += ["--model", model] }
         case .gemini:
-            if executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy" {
-                let agyModel: String
-                switch model {
-                case "", "auto", "flash", "flash-lite": agyModel = "gemini-3.8-flash-low"
-                case "pro": agyModel = "gemini-4-hydrogen-medium"
-                default: agyModel = model
-                }
-                arguments = ["-p", "", "--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--model", agyModel]
-            } else {
-                arguments = ["-p", "Answer the supplied text.", "-o", "json"]
-                if !model.isEmpty { arguments += ["--model", model] }
-            }
+            arguments = ["-p", "Answer the supplied text.", "-o", "json"]
+            if !model.isEmpty { arguments += ["--model", model] }
         default:
             throw AnalysisError.badResponse("Invalid CLI provider.")
         }
         guard !executable.isEmpty else { throw AnalysisError.badResponse("Set the CLI executable path in Settings.") }
         let identifier = UUID().uuidString
-        let isAgy = kind == .gemini && (executable == "@agy" || URL(fileURLWithPath: executable).lastPathComponent == "agy")
         var payload: [String: Any] = ["operation": "cli", "id": identifier, "executable": executable,
                                       "arguments": arguments, "input": "\(system)\n\n\(user)", "timeout": 90.0,
-                                      "preset": isAgy ? "antigravity" : kind.rawValue]
+                                      "preset": kind.rawValue]
         if let jpeg {
-            guard ([.claudeCode, .codex, .copilot].contains(kind) || (kind == .gemini && isAgy)), ScreenContext.validateJPEG(jpeg) else {
+            guard [.claudeCode, .codex, .copilot].contains(kind), ScreenContext.validateJPEG(jpeg) else {
                 throw AnalysisError.badResponse("This CLI cannot accept the selected screen image.")
             }
             payload["jpeg"] = jpeg.base64EncodedString()
@@ -186,8 +176,6 @@ final class CLIAnalysisProvider: AnalysisProvider {
         let parsedResult: (text: String, inputTokens: Int, outputTokens: Int)
         if kind == .claudeCode {
             parsedResult = try Self.parseCLIOutput(responseString, kind: kind)
-        } else if isAgy {
-            parsedResult = try Self.parseCLIOutput(responseString, kind: kind, isAgy: true)
         } else {
             let format = kind == .codex ? "codex" : kind == .copilot ? "copilot" : kind == .gemini ? "gemini" : Self.setting(kind, "format")
             let text = try Self.customAnswer(response, format: format)

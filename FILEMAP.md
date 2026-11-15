@@ -127,6 +127,7 @@ tree. Line counts are rough — they flag which files are worth reading whole.
 | `Views/BriefViews.swift` | 147 | Brief summary line, documents-in-play row, live "Briefed" card (dashboard + copilot panel) |
 | `Views/SettingsCards.swift` | 191 | Settings building blocks: page, titled card, row (optional header tint), tag chip (the landing-page window look) |
 | `Views/KnowledgeSettingsView.swift` | 442 | Settings → Knowledge: folders, Use for pills and menu, About line, search, drag to move; `KnowledgeList` pure helpers |
+| `Views/InlineVideoPlayer.swift` | 22 | AppKit video player for the meeting’s inline playback |
 | `Views/MeetingDetailView.swift` | 1790 | Post-call tabs: transcript, insights, report (Write report when there is none); header with About and the note's first lines; receipts actions, bookmarks card/rows; speaker naming popover (a type-to-filter list of every name from `SpeakerNameOptions`; a name another voice has merges them, also on open); `SortedLines` (cached time order + binary-search playing line) |
 | `Views/BugReportSheet.swift` | 150 | Bug/idea report form + the corner ladybug button |
 | `Views/ReportContentView.swift` | 550 | Report section cards, scorecard rows, talk-ratio bar, prose parser (incl. one-line local reports; knows the meeting's template titles), receipt chips + popover |

@@ -67,18 +67,26 @@ import Darwin
         precondition(envelope?["type"] as? String == "user" && message?["role"] as? String == "user")
         precondition(image?["media_type"] as? String == "image/jpeg" && image?["data"] as? String == (jpeg as Data).base64EncodedString())
         precondition(content?.last?["text"] as? String == "synthetic prompt", claudeOutput.1 ?? "Claude input failed")
-        let agyCheckScript = "import sys,json; assert '--settings' in sys.argv; idx=sys.argv.index('--settings'); assert sys.argv[idx+1]=='{}'; data=json.loads(sys.stdin.read().strip()); assert data['event']=='user'; content=data['message']['content']; assert content[0]['type']=='image' and content[0]['source']['media_type']=='image/jpeg'; assert content[1]['type']=='text' and content[1]['text']=='hello agy'; print('agy-verified')"
+        let markerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: markerDirectory, withIntermediateDirectories: false)
+        defer { try! FileManager.default.removeItem(at: markerDirectory) }
+        let marker = markerDirectory.appendingPathComponent("executed")
         let agyRequest = try JSONSerialization.data(withJSONObject: [
             "id": UUID().uuidString,
             "executable": "/usr/bin/python3",
-            "arguments": ["-c", agyCheckScript, "-p", "", "--input-format", "stream-json", "--output-format", "stream-json"],
+            "arguments": ["-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch(); print('executed')", marker.path],
             "input": "hello agy",
             "timeout": 5,
             "preset": "antigravity",
             "jpeg": (jpeg as Data).base64EncodedString()
         ])
         let agyOutput = run(agyRequest)
-        precondition(agyOutput.0.flatMap { String(data: $0, encoding: .utf8) } == "agy-verified\n", agyOutput.1 ?? "Antigravity mock CLI failed")
+        precondition(agyOutput.0 == nil && agyOutput.1 == "Antigravity is unavailable because its CLI cannot be verified to disable tools, hooks and MCP servers.")
+        precondition(!FileManager.default.fileExists(atPath: marker.path))
+        let agyCat = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/bin/cat",
+            "arguments": [], "input": "must not run", "timeout": 3, "preset": "antigravity"])
+        let rejectedCat = run(agyCat)
+        precondition(rejectedCat.0 == nil && rejectedCat.1 == agyOutput.1)
         let invalidJPEG = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "executable": "/bin/echo",
             "arguments": ["-"], "input": "", "timeout": 3, "preset": "codex", "jpeg": Data("not an image".utf8).base64EncodedString()])
         precondition(run(invalidJPEG).1 == "Invalid screen JPEG.")

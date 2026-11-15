@@ -17,6 +17,7 @@ enum ProfileTest {
     @MainActor
     static func run() {
         testMeetingDeletion()
+        testReleaseIntegrity()
         testKindStyleFallback()
         testHexColor()
         testInsightKey()
@@ -38,6 +39,7 @@ enum ProfileTest {
         testCLIResponses()
         testAssistantRouting()
         testStabilization()
+        testCleanerSafety()
         testPermissionFlow()
         testMicWatchdog()
         testCaptureClock()

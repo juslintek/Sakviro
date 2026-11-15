@@ -495,6 +495,7 @@ final class RecordingManager {
         }
 
         var videoFilter: SCContentFilter?
+        var detectedVideoUnavailable = false
         if let detectedCallAppID {
             if UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
                 let capture = VideoCaptureService()
@@ -504,6 +505,7 @@ final class RecordingManager {
                 } else {
                     videoFilter = nil
                     videoCapture = nil
+                    detectedVideoUnavailable = true
                 }
             }
         } else if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
@@ -522,6 +524,7 @@ final class RecordingManager {
 
         // Create meeting
         let meeting = Meeting()
+        if detectedVideoUnavailable { meeting.videoWarning = "Could not find the call window. Audio will be recorded without video." }
         meeting.sessionMode = mode
         if mode == .screenOnly { meeting.title = "Screen session" }
         if let capture = videoCapture, videoFilter != nil {
@@ -816,10 +819,8 @@ final class RecordingManager {
         if let screenSettingsObserver { NotificationCenter.default.removeObserver(screenSettingsObserver) }
         screenSettingsObserver = nil
         let screenOnly = currentMeeting?.sessionMode == .screenOnly
-        if !screenOnly { await audioCaptureManager.stopCapture() }
-
-        if let meeting = currentMeeting, !screenOnly, AudioQualityCleaner.isAutoCleanEnabled {
-            await cleanMeetingAudio(meeting, remuxVideoIfPresent: false)
+        let audioStop = Task { @MainActor in
+            if !screenOnly { await audioCaptureManager.stopCapture() }
         }
 
         if let capture = videoCapture, let meeting = currentMeeting {
@@ -834,7 +835,6 @@ final class RecordingManager {
                     else {
                         meeting.rawVideoPath = url.path
                         meeting.videoOffset = offset
-                        await retryVideoMux(meeting)
                     }
                 } else {
                     try await capture.stopWatching()
@@ -844,7 +844,6 @@ final class RecordingManager {
                 else {
                     meeting.rawVideoPath = url.path
                     meeting.videoOffset = offset
-                    await retryVideoMux(meeting)
                 }
                 meeting.videoWarning = reason
             } catch {
@@ -854,6 +853,18 @@ final class RecordingManager {
                 meeting.videoWarning = earlyNote
             }
             videoCapture = nil
+        }
+        await audioStop.value
+
+        if let meeting = currentMeeting, !screenOnly {
+            if AudioQualityCleaner.isAutoCleanEnabled {
+                await cleanMeetingAudio(meeting, remuxVideoIfPresent: false)
+            }
+            if meeting.rawVideoPath != nil {
+                let captureWarning = meeting.videoWarning
+                await retryVideoMux(meeting)
+                if let captureWarning, meeting.videoWarning == nil { meeting.videoWarning = captureWarning }
+            }
         }
 
         // Drain the transcription backlog so the call's final words land before
@@ -1318,11 +1329,28 @@ final class RecordingManager {
                 try AudioQualityCleaner.cleanMeetingTracks(systemPath: sys, micPath: mic)
             }.value
 
+            let previousSystemPath = meeting.cleanedSystemAudioPath
+            let previousMicPath = meeting.cleanedMicAudioPath
+            let previousReport = meeting.audioQualityReportData
+            let previousUseCleanedAudio = meeting.useCleanedAudio
             meeting.cleanedSystemAudioPath = result.cleanedSystemPath
             meeting.cleanedMicAudioPath = result.cleanedMicPath
             meeting.audioQualityReport = result.report
             meeting.useCleanedAudio = true
-            try? modelContext?.save()
+            do {
+                guard let modelContext else { throw CocoaError(.fileNoSuchFile) }
+                try modelContext.save()
+            } catch {
+                meeting.cleanedSystemAudioPath = previousSystemPath
+                meeting.cleanedMicAudioPath = previousMicPath
+                meeting.audioQualityReportData = previousReport
+                meeting.useCleanedAudio = previousUseCleanedAudio
+                for path in [result.cleanedSystemPath, result.cleanedMicPath].compactMap({ $0 }) {
+                    do { try FileManager.default.removeItem(atPath: path) }
+                    catch { NSLog("Parrot: could not remove unsaved cleaned audio: \(error.localizedDescription)") }
+                }
+                throw error
+            }
 
             if remuxVideoIfPresent,
                let vPath = meeting.videoPath?.nilIfEmpty,
@@ -1992,6 +2020,7 @@ final class RecordingManager {
                 micPath: micPath,
                 language: language,
                 apiKey: groqKey,
+                strictTracks: true,
                 timeline: timeline,
                 onProgress: onProgress,
                 onTrace: traceCallback
@@ -2000,6 +2029,7 @@ final class RecordingManager {
             polished = try await TranscriptPolisher.polish(
                 systemPath: systemPath,
                 micPath: micPath,
+                strictTracks: true,
                 timeline: timeline,
                 onProgress: onProgress,
                 onTrace: traceCallback,
@@ -2026,6 +2056,8 @@ final class RecordingManager {
         var finalSegments: [(text: String, start: Double, end: Double, speaker: String)] = rawLines.map {
             ($0.text, $0.start, $0.end, $0.speaker)
         }
+
+        var newEmbeddingsData = meeting.speakerEmbeddingsData
 
         // Stage 3: diarizing (fraction 0.84)
         transcriptionJobs[meeting.id] = TranscriptionJobProgress(
@@ -2067,7 +2099,7 @@ final class RecordingManager {
                 }
                 let embeddings = Dictionary(uniqueKeysWithValues:
                     output.embeddings.map { (mapping[$0.key] ?? $0.key, $0.value) })
-                meeting.speakerEmbeddingsData = try? JSONEncoder().encode(embeddings)
+                newEmbeddingsData = try JSONEncoder().encode(embeddings)
 
                 var speakerTurnCounts: [String: Int] = [:]
                 for turn in turns {
@@ -2098,13 +2130,6 @@ final class RecordingManager {
                 )
             }
         }
-        let newLabels = Set(finalSegments.map(\.speaker))
-        let currentNames = meeting.speakerNames
-        let keptNames = currentNames.filter { newLabels.contains($0.key) }
-        if keptNames.count != currentNames.count {
-            meeting.speakerNames = keptNames
-        }
-        meeting.mergeSameNamedSpeakers()
         try Task.checkCancellation()
 
         // Stage 4: indexingAndSaving (fraction 0.94)
@@ -2120,22 +2145,46 @@ final class RecordingManager {
         )
         try Task.checkCancellation()
 
-        for old in meeting.segments {
-            modelContext.delete(old)
-        }
-        for s in finalSegments {
-            let segment = TranscriptSegment(
-                startTime: s.start, endTime: s.end,
-                text: s.text, speakerLabel: s.speaker, confidence: nil)
-            modelContext.insert(segment)
-            segment.meeting = meeting
-        }
-        try modelContext.save()
-        await memory.index(meeting)
-        ExportFolder.refreshIfSaved(meeting)
+        let savedMeeting = try Self.saveRetranscription(
+            meetingID: meeting.id, context: modelContext,
+            segments: finalSegments, embeddingsData: newEmbeddingsData
+        )
+        await memory.index(savedMeeting)
+        ExportFolder.refreshIfSaved(savedMeeting)
         completedRetranscribeIDs.insert(meeting.id)
         succeeded = true
         return finalSegments.count
+    }
+
+    static func saveRetranscription(
+        meetingID: UUID, context: ModelContext,
+        segments: [(text: String, start: Double, end: Double, speaker: String)], embeddingsData: Data?
+    ) throws -> Meeting {
+        try Task.checkCancellation()
+        if context.hasChanges { try context.save() }
+        guard let meeting = try context.fetch(FetchDescriptor<Meeting>(predicate: #Predicate { $0.id == meetingID })).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        do {
+            let oldSegments = meeting.segments
+            meeting.segments.removeAll()
+            for old in oldSegments { context.delete(old) }
+            for line in segments {
+                let segment = TranscriptSegment(startTime: line.start, endTime: line.end, text: line.text, speakerLabel: line.speaker, confidence: nil)
+                context.insert(segment)
+                segment.meeting = meeting
+            }
+            let labels = Set(segments.map(\.speaker))
+            meeting.speakerNames = meeting.speakerNames.filter { labels.contains($0.key) }
+            meeting.speakerEmbeddingsData = embeddingsData
+            meeting.mergeSameNamedSpeakers()
+            try Task.checkCancellation()
+            try context.save()
+            return meeting
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 
     @discardableResult

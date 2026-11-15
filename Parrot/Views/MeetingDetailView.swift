@@ -493,7 +493,7 @@ struct MeetingDetailView: View {
     private var inlineVideoContainer: some View {
         if showInlineVideo, let _ = playableVideoURL, let player = inlineVideoPlayer {
             ZStack(alignment: .bottomLeading) {
-                VideoPlayer(player: player)
+                InlineVideoPlayer(player: player)
                     .aspectRatio(16/9, contentMode: .fit)
                     .frame(maxHeight: 300)
                     .background(Color.black)

@@ -122,16 +122,9 @@ enum AudioQualityCleaner {
     }
 
     static func cleanedPath(for originalPath: String) -> String {
-        if originalPath.hasSuffix(".cleaned.caf") {
-            return originalPath
-        }
         let url = URL(fileURLWithPath: originalPath)
-        let dir = url.deletingLastPathComponent().path
         let stem = url.deletingPathExtension().lastPathComponent
-        if dir.isEmpty || dir == "." {
-            return stem + ".cleaned.caf"
-        }
-        return (dir as NSString).appendingPathComponent(stem + ".cleaned.caf")
+        return url.deletingLastPathComponent().appendingPathComponent("\(stem).\(UUID().uuidString).cleaned.caf").path
     }
 
     // MARK: - Internal Biquad Filters
@@ -941,8 +934,6 @@ enum AudioQualityCleaner {
 
     private static func writeAudioFile(samples: [Float], sampleRate: Double, outPath: String) throws {
         let outURL = URL(fileURLWithPath: outPath)
-        try? FileManager.default.removeItem(at: outURL)
-
         guard let monoFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: sampleRate,
@@ -1183,8 +1174,15 @@ enum AudioQualityCleaner {
         var tracks: [AudioTrackMetrics] = []
         var anomalies: [AudioAnomalyFinding] = []
 
-        let hasSys = (systemPath != nil && !systemPath!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && FileManager.default.fileExists(atPath: systemPath!))
-        let hasMic = (micPath != nil && !micPath!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && FileManager.default.fileExists(atPath: micPath!))
+        let hasSys = systemPath.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let hasMic = micPath.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        var stagedPaths: [String] = []
+        var completed = false
+        defer {
+            if !completed {
+                for path in stagedPaths { try? FileManager.default.removeItem(atPath: path) }
+            }
+        }
 
         var rawSysSamples: [Float]? = nil
         var sysSampleRate: Double = 0.0
@@ -1229,7 +1227,15 @@ enum AudioQualityCleaner {
                 trackLabel: "System Audio"
             )
             let outPath = cleanedPath(for: sysPath)
+            guard !FileManager.default.fileExists(atPath: outPath) else {
+                throw NSError(domain: "AudioQualityCleaner", code: -6, userInfo: [NSLocalizedDescriptionKey: "Cleaned audio destination already exists"])
+            }
+            stagedPaths.append(outPath)
             try writeAudioFile(samples: cleanedSamples, sampleRate: sysSampleRate, outPath: outPath)
+            let written = try AVAudioFile(forReading: URL(fileURLWithPath: outPath))
+            guard written.length == AVAudioFramePosition(cleanedSamples.count) else {
+                throw NSError(domain: "AudioQualityCleaner", code: -5, userInfo: [NSLocalizedDescriptionKey: "Cleaned audio has an unexpected length"])
+            }
             cleanedSystemPath = outPath
             tracks.append(sysMetrics)
             anomalies.append(contentsOf: sysFindings)
@@ -1243,7 +1249,15 @@ enum AudioQualityCleaner {
                 trackLabel: "Microphone Audio"
             )
             let outPath = cleanedPath(for: mPath)
+            guard !FileManager.default.fileExists(atPath: outPath) else {
+                throw NSError(domain: "AudioQualityCleaner", code: -6, userInfo: [NSLocalizedDescriptionKey: "Cleaned audio destination already exists"])
+            }
+            stagedPaths.append(outPath)
             try writeAudioFile(samples: cleanedSamples, sampleRate: micSampleRate, outPath: outPath)
+            let written = try AVAudioFile(forReading: URL(fileURLWithPath: outPath))
+            guard written.length == AVAudioFramePosition(cleanedSamples.count) else {
+                throw NSError(domain: "AudioQualityCleaner", code: -5, userInfo: [NSLocalizedDescriptionKey: "Cleaned audio has an unexpected length"])
+            }
             cleanedMicPath = outPath
             tracks.append(micMetrics)
             anomalies.append(contentsOf: micFindings)
@@ -1257,6 +1271,7 @@ enum AudioQualityCleaner {
             elapsedMs: elapsed
         )
 
+        completed = true
         return (cleanedSystemPath, cleanedMicPath, report)
     }
 }
