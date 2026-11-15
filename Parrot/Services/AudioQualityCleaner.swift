@@ -12,6 +12,8 @@ struct AudioAnomalyFinding: Codable, Equatable, Sendable, Identifiable {
         case backgroundHiss
         case lowLoudness
         case dropoutGaps
+        case speakerBleed
+        case harshSibilance
     }
     var id: String { "\(track):\(kind.rawValue)" }
     let track: String
@@ -179,15 +181,19 @@ enum AudioQualityCleaner {
             a2 = Float((1.0 - alpha) / a0)
         }
 
-        mutating func process(_ samples: [Float]) -> [Float] {
-            var out = [Float](repeating: 0, count: samples.count)
+        mutating func processInPlace(_ samples: inout [Float]) {
             for i in 0..<samples.count {
                 let x = samples[i]
                 let y = b0 * x + z1
                 z1 = b1 * x - a1 * y + z2
                 z2 = b2 * x - a2 * y
-                out[i] = y
+                samples[i] = y
             }
+        }
+
+        mutating func process(_ samples: [Float]) -> [Float] {
+            var out = samples
+            processInPlace(&out)
             return out
         }
     }
@@ -238,6 +244,36 @@ enum AudioQualityCleaner {
             b2 = Float((a * ((a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha)) / a0)
             a1 = Float((2.0 * ((a - 1.0) - (a + 1.0) * cosW0)) / a0)
             a2 = Float(((a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha) / a0)
+        }
+
+        mutating func processInPlace(_ samples: inout [Float]) {
+            for i in 0..<samples.count {
+                let x = samples[i]
+                let y = b0 * x + z1
+                z1 = b1 * x - a1 * y + z2
+                z2 = b2 * x - a2 * y
+                samples[i] = y
+            }
+        }
+    }
+
+    struct BiquadPeakingEQ {
+        private var b0: Float, b1: Float, b2: Float, a1: Float, a2: Float
+        private var z1: Float = 0, z2: Float = 0
+
+        init(f0: Double = 5600.0, gainDB: Double = -2.5, q: Double = 1.4, sampleRate: Double = 16000.0) {
+            let a = pow(10.0, gainDB / 40.0)
+            let w0 = 2.0 * Double.pi * f0 / sampleRate
+            let cosW0 = cos(w0)
+            let sinW0 = sin(w0)
+            let alpha = sinW0 / (2.0 * q)
+
+            let a0 = 1.0 + alpha / a
+            b0 = Float((1.0 + alpha * a) / a0)
+            b1 = Float((-2.0 * cosW0) / a0)
+            b2 = Float((1.0 - alpha * a) / a0)
+            a1 = Float((-2.0 * cosW0) / a0)
+            a2 = Float((1.0 - alpha / a) / a0)
         }
 
         mutating func processInPlace(_ samples: inout [Float]) {
@@ -362,7 +398,7 @@ enum AudioQualityCleaner {
             findings.append(AudioAnomalyFinding(
                 track: trackLabel,
                 kind: .mainsHum,
-                detail: String(format: "%d Hz mains hum notch applied (narrowband tone detected)", hum),
+                detail: "\(hum) Hz mains hum notch applied (narrowband tone detected)",
                 fixed: true
             ))
         }
@@ -405,7 +441,7 @@ enum AudioQualityCleaner {
             findings.append(AudioAnomalyFinding(
                 track: trackLabel,
                 kind: .dropoutGaps,
-                detail: String(format: "%d hard dropout gap%@ smoothed with cosine crossfades", dropoutGaps.count, dropoutGaps.count == 1 ? "" : "s"),
+                detail: "\(dropoutGaps.count) hard dropout gap\(dropoutGaps.count == 1 ? "" : "s") smoothed with cosine crossfades",
                 fixed: true
             ))
         }
@@ -508,12 +544,15 @@ enum AudioQualityCleaner {
 
         let speechThreshold = max(noiseFloorLinear * 2.5, 0.0035)
         let speechFrames = frameRMSs.filter { $0 > speechThreshold }
+        let speechRMSBeforeLinear: Double
         let speechRMSdBFSBefore: Double
         if speechFrames.isEmpty {
+            speechRMSBeforeLinear = 0.0
             speechRMSdBFSBefore = -100.0
         } else {
             let meanSq = speechFrames.reduce(0.0) { $0 + $1 * $1 } / Double(speechFrames.count)
-            speechRMSdBFSBefore = 20.0 * log10(max(sqrt(meanSq), 1e-6))
+            speechRMSBeforeLinear = sqrt(meanSq)
+            speechRMSdBFSBefore = 20.0 * log10(max(speechRMSBeforeLinear, 1e-6))
         }
 
         var peakVal: Float = 0
@@ -535,6 +574,57 @@ enum AudioQualityCleaner {
                 detail: String(format: "Speech loudness low (%.1f dBFS) — boosted toward studio target (-18 dBFS)", speechRMSdBFSBefore),
                 fixed: true
             ))
+        }
+
+        // 8. High-Frequency Sibilance & Spectral Balance Analysis (4.5–7.2 kHz)
+        var isSibilantFrame = [Bool](repeating: false, count: numFrames)
+        var sibilantFrameCount = 0
+        var totalVoicedHighRMS: Double = 0
+        var totalVoicedMidRMS: Double = 0
+        var totalVoicedFrames = 0
+
+        if sampleRate >= 16000.0 && numFrames > 0 {
+            var highHPF = BiquadHPF(cutoff: 4800.0, sampleRate: sampleRate)
+            var highSamples = analysisSamples
+            highHPF.processInPlace(&highSamples)
+
+            var midHPF = BiquadHPF(cutoff: 300.0, sampleRate: sampleRate)
+            var midLPF = BiquadLPF(cutoff: 3500.0, sampleRate: sampleRate)
+            var midSamples = analysisSamples
+            midHPF.processInPlace(&midSamples)
+            midLPF.processInPlace(&midSamples)
+
+            for f in 0..<numFrames {
+                let offset = f * frameLen
+                var hRMS: Float = 0
+                highSamples.withUnsafeBufferPointer { ptr in
+                    vDSP_rmsqv(ptr.baseAddress! + offset, 1, &hRMS, vDSP_Length(frameLen))
+                }
+                var mRMS: Float = 0
+                midSamples.withUnsafeBufferPointer { ptr in
+                    vDSP_rmsqv(ptr.baseAddress! + offset, 1, &mRMS, vDSP_Length(frameLen))
+                }
+
+                if frameRMSs[f] > speechThreshold {
+                    totalVoicedHighRMS += Double(hRMS)
+                    totalVoicedMidRMS += Double(mRMS)
+                    totalVoicedFrames += 1
+
+                    if hRMS > 0.65 * mRMS && Double(hRMS) > max(0.03, speechRMSBeforeLinear * 0.42) {
+                        isSibilantFrame[f] = true
+                        sibilantFrameCount += 1
+                    }
+                }
+            }
+
+            if sibilantFrameCount >= 3 {
+                findings.append(AudioAnomalyFinding(
+                    track: trackLabel,
+                    kind: .harshSibilance,
+                    detail: "Tamed harsh high-frequency sibilance",
+                    fixed: true
+                ))
+            }
         }
 
         // MARK: - Remediation DSP Chain
@@ -662,8 +752,45 @@ enum AudioQualityCleaner {
             work[i] *= currentGain
         }
 
-        // 7. Crisp Vocal Presence High-Shelf
-        if sampleRate >= 12000.0 && 3200.0 < 0.45 * sampleRate {
+        // 7. Dynamic Harshness / Sibilance Tamer & Vocal Presence High-Shelf
+        if sampleRate >= 16000.0 {
+            if sibilantFrameCount >= 3 && 5600.0 < 0.45 * sampleRate {
+                var peakCut = BiquadPeakingEQ(f0: 5600.0, gainDB: -3.5, q: 1.2, sampleRate: sampleRate)
+                var cutWork = work
+                peakCut.processInPlace(&cutWork)
+
+                let alphaAttack = Float(1.0 - exp(-1.0 / (sampleRate * 0.005)))
+                let alphaRelease = Float(1.0 - exp(-1.0 / (sampleRate * 0.030)))
+                var blend: Float = 0.0
+
+                for f in 0..<numFrames {
+                    let target: Float = isSibilantFrame[f] ? 1.0 : 0.0
+                    let start = f * frameLen
+                    let end = min(work.count, (f + 1) * frameLen)
+                    for i in start..<end {
+                        blend += (target > blend ? alphaAttack : alphaRelease) * (target - blend)
+                        work[i] = (1.0 - blend) * work[i] + blend * cutWork[i]
+                    }
+                }
+                let processedLen = numFrames * frameLen
+                if processedLen < work.count {
+                    let target: Float = 0.0
+                    for i in processedLen..<work.count {
+                        blend += (target > blend ? alphaAttack : alphaRelease) * (target - blend)
+                        work[i] = (1.0 - blend) * work[i] + blend * cutWork[i]
+                    }
+                }
+            }
+
+            let avgHigh = totalVoicedFrames > 0 ? (totalVoicedHighRMS / Double(totalVoicedFrames)) : 0.0
+            let avgMid = totalVoicedFrames > 0 ? (totalVoicedMidRMS / Double(totalVoicedFrames)) : 0.0
+            let isDull = (totalVoicedFrames == 0) || (avgHigh < 0.25 * avgMid && sibilantFrameCount < max(5, totalVoicedFrames / 10))
+
+            if isDull && 3200.0 < 0.45 * sampleRate {
+                var shelf = BiquadHighShelf(f0: 3200.0, gainDB: 2.0, q: 0.70710678, sampleRate: sampleRate)
+                shelf.processInPlace(&work)
+            }
+        } else if sampleRate >= 12000.0 && 3200.0 < 0.45 * sampleRate {
             var shelf = BiquadHighShelf(f0: 3200.0, gainDB: 2.0, q: 0.70710678, sampleRate: sampleRate)
             shelf.processInPlace(&work)
         }
@@ -714,19 +841,19 @@ enum AudioQualityCleaner {
             afterFrameRMSs.append(Double(rms))
         }
 
-        let nonSilentAfter = afterFrameRMSs.filter { $0 > 1e-6 }.sorted()
+        let sortedRMSAfter = afterFrameRMSs.sorted()
         let noiseFloordBFSAfter: Double
         let noiseFloorLinearAfter: Double
-        if nonSilentAfter.isEmpty {
+        if sortedRMSAfter.isEmpty {
             noiseFloorLinearAfter = 1e-5
             noiseFloordBFSAfter = -100.0
         } else {
-            let p15Index = min(nonSilentAfter.count - 1, max(0, Int(Double(nonSilentAfter.count) * 0.15)))
-            noiseFloorLinearAfter = nonSilentAfter[p15Index]
+            let pIndex = min(sortedRMSAfter.count - 1, max(0, Int(Double(sortedRMSAfter.count) * 0.10)))
+            noiseFloorLinearAfter = max(sortedRMSAfter[pIndex], 1e-5)
             noiseFloordBFSAfter = 20.0 * log10(max(noiseFloorLinearAfter, 1e-6))
         }
 
-        let speechThresholdAfter = max(noiseFloorLinearAfter * 2.5, 0.0035)
+        let speechThresholdAfter = min(max(noiseFloorLinearAfter * 2.5, 0.0035), 0.04)
         let speechFramesAfter = afterFrameRMSs.filter { $0 > speechThresholdAfter }
         let speechRMSdBFSAfter: Double
         if speechFramesAfter.isEmpty {
@@ -852,6 +979,202 @@ enum AudioQualityCleaner {
         }
     }
 
+    // MARK: - Cross-Track Speaker Bleed Suppression
+
+    static func suppressSpeakerBleed(
+        mic: [Float],
+        system: [Float],
+        sampleRate: Double
+    ) -> (cleanedMic: [Float], attenuatedSeconds: Double) {
+        suppressSpeakerBleed(
+            mic: mic,
+            micSampleRate: sampleRate,
+            system: system,
+            systemSampleRate: sampleRate
+        )
+    }
+
+    static func suppressSpeakerBleed(
+        mic: [Float],
+        micSampleRate: Double,
+        system: [Float],
+        systemSampleRate: Double
+    ) -> (cleanedMic: [Float], attenuatedSeconds: Double) {
+        guard !mic.isEmpty, !system.isEmpty, micSampleRate >= 8000.0, systemSampleRate >= 8000.0 else {
+            return (mic, 0.0)
+        }
+
+        let micFrameSamples = max(64, Int(micSampleRate * 0.02))
+        let micFrameCount = mic.count / micFrameSamples
+        guard micFrameCount > 0 else { return (mic, 0.0) }
+
+        let sysFrameSamples = max(64, Int(systemSampleRate * 0.02))
+        let sysFrameCount = system.count / sysFrameSamples
+        guard sysFrameCount > 0 else { return (mic, 0.0) }
+
+        var micRMS = [Float](repeating: 0, count: micFrameCount)
+        for f in 0..<micFrameCount {
+            let offset = f * micFrameSamples
+            mic.withUnsafeBufferPointer { ptr in
+                vDSP_rmsqv(ptr.baseAddress! + offset, 1, &micRMS[f], vDSP_Length(micFrameSamples))
+            }
+        }
+
+        var sysRMS = [Float](repeating: 0, count: sysFrameCount)
+        for f in 0..<sysFrameCount {
+            let offset = f * sysFrameSamples
+            system.withUnsafeBufferPointer { ptr in
+                vDSP_rmsqv(ptr.baseAddress! + offset, 1, &sysRMS[f], vDSP_Length(sysFrameSamples))
+            }
+        }
+
+        // Find acoustic lag bestLagFrames in 0...5 frames (0...100 ms) maximizing normalized
+        // cross-correlation between system frame RMS and mic frame RMS over active system frames.
+        var bestLag = 0
+        var bestCorr: Double = -1.0
+
+        for lag in 0...5 {
+            var sValues: [Double] = []
+            var mValues: [Double] = []
+            sValues.reserveCapacity(sysFrameCount)
+            mValues.reserveCapacity(sysFrameCount)
+            var activeSystemCount = 0
+
+            for i in 0..<sysFrameCount {
+                let micIdx = i + lag
+                guard micIdx < micFrameCount else { break }
+                let s = Double(sysRMS[i])
+                let m = Double(micRMS[micIdx])
+                if s > 0.015 {
+                    activeSystemCount += 1
+                }
+                if m > max(0.06, s * 0.60) {
+                    continue
+                }
+                sValues.append(s)
+                mValues.append(m)
+            }
+
+            guard activeSystemCount >= 10 else { continue }
+            let n = sValues.count
+            guard n >= 10 else { continue }
+
+            var sumS: Double = 0
+            var sumM: Double = 0
+            for k in 0..<n {
+                sumS += sValues[k]
+                sumM += mValues[k]
+            }
+            let meanS = sumS / Double(n)
+            let meanM = sumM / Double(n)
+
+            var varS: Double = 0
+            var varM: Double = 0
+            var cov: Double = 0
+            for k in 0..<n {
+                let ds = sValues[k] - meanS
+                let dm = mValues[k] - meanM
+                varS += ds * ds
+                varM += dm * dm
+                cov += ds * dm
+            }
+
+            let denom = sqrt(varS * varM)
+            let corr = denom > 1e-9 ? (cov / denom) : 0.0
+            if corr > bestCorr {
+                bestCorr = corr
+                bestLag = lag
+            }
+        }
+
+        // Require normalized envelope correlation >= 0.35 over active system frames
+        guard bestCorr >= 0.35 else {
+            return (mic, 0.0)
+        }
+
+        // AND at least 0.5s (25 frames) where sysDelayedRMS > 0.015, micRMS > 0.002,
+        // and micRMS < sysDelayedRMS * 0.55 (bleed-dominated rather than true double-talk)
+        var silentMicValues: [Double] = []
+        var bleedDominantMicValues: [Double] = []
+        for f in 0..<micFrameCount {
+            let sysIdx = f - bestLag
+            let sysDelayedRMS = (sysIdx >= 0 && sysIdx < sysFrameCount) ? Double(sysRMS[sysIdx]) : 0.0
+            let mRMS = Double(micRMS[f])
+            if sysDelayedRMS < 0.005 {
+                silentMicValues.append(mRMS)
+            }
+            if sysDelayedRMS > 0.015 && mRMS > 0.002 && mRMS < sysDelayedRMS * 0.55 {
+                bleedDominantMicValues.append(mRMS)
+            }
+        }
+
+        guard bleedDominantMicValues.count >= 25 else {
+            return (mic, 0.0)
+        }
+
+        if silentMicValues.count >= 5 {
+            let sortedSilent = silentMicValues.sorted()
+            let silentMicMedian = sortedSilent[sortedSilent.count / 2]
+            let meanBleedMic = bleedDominantMicValues.reduce(0.0, +) / Double(bleedDominantMicValues.count)
+            guard meanBleedMic > max(0.002, silentMicMedian * 1.6) else {
+                return (mic, 0.0)
+            }
+        }
+
+        // Bleed IS confirmed: calculate target frame gains
+        var targetGains = [Float](repeating: 1.0, count: micFrameCount)
+        var attenuatedFrames = 0
+
+        for f in 0..<micFrameCount {
+            let sysIdx = f - bestLag
+            let sysDelayedRMS = (sysIdx >= 0 && sysIdx < sysFrameCount) ? Double(sysRMS[sysIdx]) : 0.0
+            let mRMS = Double(micRMS[f])
+
+            if sysDelayedRMS > 0.015 && mRMS < sysDelayedRMS * 0.50 {
+                targetGains[f] = 0.22
+                attenuatedFrames += 1
+            } else {
+                targetGains[f] = 1.0
+            }
+        }
+
+        // Apply per-sample one-pole gain smoothing (attack = 6 ms, release = 90 ms)
+        var cleanedMic = [Float](repeating: 0, count: mic.count)
+        let alphaAttack = Float(1.0 - exp(-1.0 / (micSampleRate * 0.006)))
+        let alphaRelease = Float(1.0 - exp(-1.0 / (micSampleRate * 0.090)))
+        var currentGain: Float = 1.0
+
+        for f in 0..<micFrameCount {
+            let target = targetGains[f]
+            let start = f * micFrameSamples
+            let end = min(mic.count, (f + 1) * micFrameSamples)
+            for i in start..<end {
+                if target < currentGain {
+                    currentGain += alphaAttack * (target - currentGain)
+                } else {
+                    currentGain += alphaRelease * (target - currentGain)
+                }
+                cleanedMic[i] = mic[i] * currentGain
+            }
+        }
+
+        let processedCount = micFrameCount * micFrameSamples
+        if processedCount < mic.count {
+            let target: Float = 1.0
+            for i in processedCount..<mic.count {
+                if target < currentGain {
+                    currentGain += alphaAttack * (target - currentGain)
+                } else {
+                    currentGain += alphaRelease * (target - currentGain)
+                }
+                cleanedMic[i] = mic[i] * currentGain
+            }
+        }
+
+        let attenuatedSeconds = Double(attenuatedFrames) * 0.02
+        return (cleanedMic, attenuatedSeconds)
+    }
+
     static func cleanMeetingTracks(
         systemPath: String?,
         micPath: String?
@@ -860,35 +1183,67 @@ enum AudioQualityCleaner {
         var tracks: [AudioTrackMetrics] = []
         var anomalies: [AudioAnomalyFinding] = []
 
+        let hasSys = (systemPath != nil && !systemPath!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && FileManager.default.fileExists(atPath: systemPath!))
+        let hasMic = (micPath != nil && !micPath!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && FileManager.default.fileExists(atPath: micPath!))
+
+        var rawSysSamples: [Float]? = nil
+        var sysSampleRate: Double = 0.0
+        if hasSys, let sysPath = systemPath {
+            let (samples, rate) = try loadAudioFile(path: sysPath)
+            rawSysSamples = samples
+            sysSampleRate = rate
+        }
+
+        var rawMicSamples: [Float]? = nil
+        var micSampleRate: Double = 0.0
+        if hasMic, let mPath = micPath {
+            let (samples, rate) = try loadAudioFile(path: mPath)
+            rawMicSamples = samples
+            micSampleRate = rate
+        }
+
+        var micSamplesToProcess = rawMicSamples
+        if let micSamples = rawMicSamples, let sysSamples = rawSysSamples {
+            let (cleanedMic, attenuatedSeconds) = suppressSpeakerBleed(
+                mic: micSamples,
+                micSampleRate: micSampleRate,
+                system: sysSamples,
+                systemSampleRate: sysSampleRate
+            )
+            micSamplesToProcess = cleanedMic
+            if attenuatedSeconds >= 0.5 {
+                anomalies.append(AudioAnomalyFinding(
+                    track: "Microphone",
+                    kind: .speakerBleed,
+                    detail: String(format: "Suppressed %.1fs of remote speaker echo bleed", attenuatedSeconds),
+                    fixed: true
+                ))
+            }
+        }
+
         var cleanedSystemPath: String? = nil
-        if let sysPath = systemPath,
-           !sysPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           FileManager.default.fileExists(atPath: sysPath) {
-            let (rawSamples, sampleRate) = try loadAudioFile(path: sysPath)
+        if let sysSamples = rawSysSamples, let sysPath = systemPath {
             let (cleanedSamples, sysMetrics, sysFindings) = processBuffer(
-                rawSamples,
-                sampleRate: sampleRate,
+                sysSamples,
+                sampleRate: sysSampleRate,
                 trackLabel: "System Audio"
             )
             let outPath = cleanedPath(for: sysPath)
-            try writeAudioFile(samples: cleanedSamples, sampleRate: sampleRate, outPath: outPath)
+            try writeAudioFile(samples: cleanedSamples, sampleRate: sysSampleRate, outPath: outPath)
             cleanedSystemPath = outPath
             tracks.append(sysMetrics)
             anomalies.append(contentsOf: sysFindings)
         }
 
         var cleanedMicPath: String? = nil
-        if let mPath = micPath,
-           !mPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           FileManager.default.fileExists(atPath: mPath) {
-            let (rawSamples, sampleRate) = try loadAudioFile(path: mPath)
+        if let micSamples = micSamplesToProcess, let mPath = micPath {
             let (cleanedSamples, micMetrics, micFindings) = processBuffer(
-                rawSamples,
-                sampleRate: sampleRate,
+                micSamples,
+                sampleRate: micSampleRate,
                 trackLabel: "Microphone Audio"
             )
             let outPath = cleanedPath(for: mPath)
-            try writeAudioFile(samples: cleanedSamples, sampleRate: sampleRate, outPath: outPath)
+            try writeAudioFile(samples: cleanedSamples, sampleRate: micSampleRate, outPath: outPath)
             cleanedMicPath = outPath
             tracks.append(micMetrics)
             anomalies.append(contentsOf: micFindings)

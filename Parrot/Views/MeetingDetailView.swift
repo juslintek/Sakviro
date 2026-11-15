@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AVKit
 import AppKit
 
 /// Which pane of the post-meeting report is showing.
@@ -38,6 +39,8 @@ struct MeetingDetailView: View {
     @State private var isScrubbing = false              // slider drag in progress
     @State private var playbackSpeed: Float = 1.0
     @State private var playbackTimer: Timer?
+    @State private var showInlineVideo = false
+    @State private var inlineVideoPlayer: AVPlayer?
     /// The key moment whose Play started the audio; nil once it stops or moves.
     @State private var playingMoment: Int?
     @State private var activeSegmentID: UUID?
@@ -115,9 +118,11 @@ struct MeetingDetailView: View {
             // insight seeking). Needs a real audio file: a recovered call whose .caf
             // couldn't be finalized has its path cleared, so hide the dead control.
             if meeting.status == .done || meeting.status == .processing,
-               meeting.systemAudioPath.nilIfEmpty != nil || meeting.micAudioPath?.nilIfEmpty != nil {
+               hasAudioTracks || playableVideoURL != nil {
                 audioPlayerBar
-                audioQualityBar
+                if hasAudioTracks {
+                    audioQualityBar
+                }
                 Divider()
             }
 
@@ -170,6 +175,16 @@ struct MeetingDetailView: View {
             await recordingManager.writeAboutIfMissing(meeting)
         }
         .onChange(of: appSession.pendingJump) { consumeJump() }
+        .onChange(of: meeting.id) { _, _ in
+            stopPlayback()
+            inlineVideoPlayer?.pause()
+            inlineVideoPlayer = nil
+            showInlineVideo = false
+            titleText = meeting.title
+            themNameText = meeting.themName ?? ""
+            prepareAudioPlayer()
+            consumeJump()
+        }
         .onChange(of: meeting.useCleanedAudio) { _, _ in
             reloadAudioPlayersPreservingPosition()
         }
@@ -201,6 +216,8 @@ struct MeetingDetailView: View {
         }
         .onDisappear {
             stopPlayback()
+            inlineVideoPlayer?.pause()
+            inlineVideoPlayer = nil
             // Renamed voices, moved or trimmed lines: refresh this meeting's
             // Ask Parrot index (a no-op when nothing changed).
             if !meeting.isDeleted, meeting.modelContext != nil, meeting.status == .done {
@@ -396,64 +413,179 @@ struct MeetingDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var hasAudioTracks: Bool {
+        meeting.systemAudioPath.nilIfEmpty != nil || meeting.micAudioPath?.nilIfEmpty != nil
+    }
+
+    private var playableVideoURL: URL? {
+        if let path = meeting.videoPath?.nilIfEmpty {
+            let url = VideoCaptureService.ownedURL(path) ?? URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        if let rawPath = meeting.rawVideoPath?.nilIfEmpty {
+            let url = VideoCaptureService.ownedURL(rawPath) ?? URL(fileURLWithPath: rawPath)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+
+    private var effectiveDuration: TimeInterval {
+        if meeting.duration > 0 { return meeting.duration }
+        if let d = audioPlayer?.duration, d > 0 { return d }
+        if let d = micPlayer?.duration, d > 0 { return d }
+        if let d = inlineVideoPlayer?.currentItem?.duration.seconds, d.isFinite && d > 0 { return d }
+        return 0
+    }
+
+    private func videoTime(for audioTime: TimeInterval) -> CMTime {
+        let t: TimeInterval
+        if meeting.videoPath != nil {
+            t = audioTime
+        } else {
+            t = max(0, audioTime - meeting.videoOffset)
+        }
+        return CMTime(seconds: max(0, t), preferredTimescale: 600)
+    }
+
+    private func audioTime(for videoTime: CMTime) -> TimeInterval {
+        let seconds = videoTime.seconds
+        guard seconds.isFinite && !seconds.isNaN else { return 0 }
+        if meeting.videoPath != nil {
+            return seconds
+        } else {
+            return seconds + meeting.videoOffset
+        }
+    }
+
+    private func toggleInlineVideo() {
+        showInlineVideo.toggle()
+        if showInlineVideo {
+            setupInlineVideoPlayer()
+        } else {
+            if !hasAudioTracks && isPlaying {
+                togglePlayback()
+            }
+            inlineVideoPlayer?.pause()
+            inlineVideoPlayer = nil
+        }
+    }
+
+    private func setupInlineVideoPlayer() {
+        guard let url = playableVideoURL else {
+            inlineVideoPlayer = nil
+            return
+        }
+        if inlineVideoPlayer == nil {
+            let player = AVPlayer(url: url)
+            player.isMuted = hasAudioTracks
+            inlineVideoPlayer = player
+        } else {
+            inlineVideoPlayer?.isMuted = hasAudioTracks
+        }
+        let target = videoTime(for: playbackTime)
+        inlineVideoPlayer?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        if isPlaying {
+            inlineVideoPlayer?.rate = playbackSpeed
+        }
+    }
+
+    @ViewBuilder
+    private var inlineVideoContainer: some View {
+        if showInlineVideo, let _ = playableVideoURL, let player = inlineVideoPlayer {
+            ZStack(alignment: .bottomLeading) {
+                VideoPlayer(player: player)
+                    .aspectRatio(16/9, contentMode: .fit)
+                    .frame(maxHeight: 300)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.radius))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Metrics.radius)
+                            .strokeBorder(Theme.Colors.line, lineWidth: 1)
+                    )
+
+                if let summary = meeting.videoTargetSummary?.nilIfEmpty {
+                    Text(summary)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, Theme.Metrics.chipInsetH)
+                        .padding(.vertical, Theme.Metrics.chipInsetV)
+                        .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 4))
+                        .padding(8)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+        }
+    }
+
     @ViewBuilder
     private var videoRow: some View {
         if meeting.videoPath != nil || meeting.rawVideoPath != nil || meeting.videoError != nil || meeting.videoWarning != nil {
-            HStack {
-                if let path = meeting.videoPath ?? meeting.rawVideoPath,
-                   let url = VideoCaptureService.ownedURL(path), FileManager.default.fileExists(atPath: url.path) {
-                    Button(meeting.videoPath == nil ? "Open raw video (no audio)" : "Open video") { NSWorkspace.shared.open(url) }
-                    Button(meeting.videoPath == nil ? "Save raw video…" : "Save video…") {
-                        let panel = NSSavePanel()
-                        panel.nameFieldStringValue = "\(meeting.title).mp4"
-                        panel.allowedContentTypes = [.mpeg4Movie]
-                        if panel.runModal() == .OK, let destination = panel.url {
-                            do {
-                                guard url.standardizedFileURL != destination.standardizedFileURL else { return }
-                                let temporary = destination.deletingLastPathComponent().appendingPathComponent(".parrot-\(UUID().uuidString).mp4")
-                                try FileManager.default.copyItem(at: url, to: temporary)
-                                do {
-                                    if FileManager.default.fileExists(atPath: destination.path) {
-                                        _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-                                    } else {
-                                        try FileManager.default.moveItem(at: temporary, to: destination)
-                                    }
-                                } catch {
-                                    try? FileManager.default.removeItem(at: temporary)
-                                    throw error
-                                }
-                            } catch { actionMessage = error.localizedDescription }
-                        }
-                    }
-                }
-                if (meeting.videoError != nil || meeting.videoWarning != nil), (meeting.rawVideoPath != nil || meeting.videoPath != nil) {
-                    Button(videoMuxing ? "Preparing…" : "Retry video with audio") {
-                        videoMuxing = true
-                        Task {
-                            await recordingManager.retryVideoMux(meeting)
-                            videoMuxing = false
-                        }
-                    }.disabled(videoMuxing)
-                }
-                if let error = meeting.videoError { Text("Video: \(error)").foregroundStyle(.red) }
-                if let warning = meeting.videoWarning {
-                    HStack(spacing: 4) {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(Theme.Colors.warn)
-                        Text("Video: \(warning)")
-                            .foregroundStyle(Theme.Colors.ink2)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if let url = playableVideoURL {
                         Button {
-                            meeting.videoWarning = nil
-                            try? modelContext.save()
+                            toggleInlineVideo()
                         } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Theme.Colors.ink3)
+                            Label(showInlineVideo ? "Hide Video" : "Watch Inline",
+                                  systemImage: showInlineVideo ? "rectangle.compress.vertical" : "play.rectangle.fill")
                         }
-                        .buttonStyle(.plain)
+                        Button(meeting.videoPath == nil ? "Open raw video (no audio)" : "Open video") { NSWorkspace.shared.open(url) }
+                        Button(meeting.videoPath == nil ? "Save raw video…" : "Save video…") {
+                            let panel = NSSavePanel()
+                            panel.nameFieldStringValue = "\(meeting.title).mp4"
+                            panel.allowedContentTypes = [.mpeg4Movie]
+                            if panel.runModal() == .OK, let destination = panel.url {
+                                do {
+                                    guard url.standardizedFileURL != destination.standardizedFileURL else { return }
+                                    let temporary = destination.deletingLastPathComponent().appendingPathComponent(".parrot-\(UUID().uuidString).mp4")
+                                    try FileManager.default.copyItem(at: url, to: temporary)
+                                    do {
+                                        if FileManager.default.fileExists(atPath: destination.path) {
+                                            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+                                        } else {
+                                            try FileManager.default.moveItem(at: temporary, to: destination)
+                                        }
+                                    } catch {
+                                        try? FileManager.default.removeItem(at: temporary)
+                                        throw error
+                                    }
+                                } catch { actionMessage = error.localizedDescription }
+                            }
+                        }
+                    }
+                    if (meeting.videoError != nil || meeting.videoWarning != nil), (meeting.rawVideoPath != nil || meeting.videoPath != nil) {
+                        Button(videoMuxing ? "Preparing…" : "Retry video with audio") {
+                            videoMuxing = true
+                            Task {
+                                await recordingManager.retryVideoMux(meeting)
+                                videoMuxing = false
+                            }
+                        }.disabled(videoMuxing)
+                    }
+                    if let error = meeting.videoError { Text("Video: \(error)").foregroundStyle(.red) }
+                    if let warning = meeting.videoWarning {
+                        HStack(spacing: 4) {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(Theme.Colors.warn)
+                            Text("Video: \(warning)")
+                                .foregroundStyle(Theme.Colors.ink2)
+                            Button {
+                                meeting.videoWarning = nil
+                                try? modelContext.save()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(Theme.Colors.ink3)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
-            }.font(Theme.Typography.caption)
+                .font(Theme.Typography.caption)
+
+                inlineVideoContainer
+            }
         }
     }
 
@@ -851,13 +983,13 @@ struct MeetingDetailView: View {
 
             // Native scrubber — drag anywhere; the seek commits on release using
             // the same call the old tap-to-seek bar used.
-            Slider(value: $playbackTime, in: 0...max(meeting.duration, 0.01)) { editing in
+            Slider(value: $playbackTime, in: 0...max(effectiveDuration, 0.01)) { editing in
                 isScrubbing = editing
                 if !editing { seekTo(playbackTime) }
             }
 
             // Time display
-            Text("\(formatTime(playbackTime)) / \(formatTime(meeting.duration))")
+            Text("\(formatTime(playbackTime)) / \(formatTime(effectiveDuration))")
                 .font(Theme.Typography.mono(11))
                 .foregroundStyle(Theme.Colors.ink2)
                 .frame(width: 100)
@@ -877,6 +1009,9 @@ struct MeetingDetailView: View {
             .onChange(of: playbackSpeed) { _, newValue in
                 audioPlayer?.rate = newValue
                 micPlayer?.rate = newValue
+                if isPlaying {
+                    inlineVideoPlayer?.rate = newValue
+                }
             }
         }
         .controlSize(.small)
@@ -1080,7 +1215,7 @@ struct MeetingDetailView: View {
     @ViewBuilder
     private var toneCard: some View {
         if let model = toneModel {
-            ToneTimelineCard(model: model, play: (audioPlayer != nil || micPlayer != nil) ? playMoment : nil,
+            ToneTimelineCard(model: model, play: (audioPlayer != nil || micPlayer != nil || playableVideoURL != nil) ? playMoment : nil,
                              playing: playingMoment, stop: { if isPlaying { togglePlayback() } })
                 .equatable()
         }
@@ -1104,7 +1239,7 @@ struct MeetingDetailView: View {
     private var receiptActions: ReceiptActions {
         // No audio (a recovered call whose file couldn't be finalized): the
         // line can still be shown, just not played.
-        ReceiptActions(play: (audioPlayer != nil || micPlayer != nil) ? playFrom : nil,
+        ReceiptActions(play: (audioPlayer != nil || micPlayer != nil || playableVideoURL != nil) ? playFrom : nil,
                        showInTranscript: { showInTranscript($0, text: $1) })
     }
 
@@ -1583,6 +1718,7 @@ struct MeetingDetailView: View {
         if wasPlaying {
             audioPlayer?.pause()
             micPlayer?.pause()
+            inlineVideoPlayer?.pause()
         }
         prepareAudioPlayer()
         audioPlayer?.currentTime = min(currentPos, audioPlayer?.duration ?? currentPos)
@@ -1601,12 +1737,28 @@ struct MeetingDetailView: View {
         let startAt = clock + 0.08
         audioPlayer?.play(atTime: startAt)
         micPlayer?.play(atTime: startAt)
+
+        if showInlineVideo || !hasAudioTracks {
+            if inlineVideoPlayer == nil {
+                setupInlineVideoPlayer()
+            }
+            if let player = inlineVideoPlayer {
+                player.isMuted = hasAudioTracks
+                let target = videoTime(for: playbackTime)
+                let actual = player.currentTime().seconds
+                if !actual.isFinite || abs(actual - target.seconds) > 0.15 {
+                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                player.rate = playbackSpeed
+            }
+        }
     }
 
     private func togglePlayback() {
         if isPlaying {
             audioPlayer?.pause()
             micPlayer?.pause()
+            inlineVideoPlayer?.pause()
             playbackTimer?.invalidate()
             playingMoment = nil
         } else {
@@ -1615,16 +1767,38 @@ struct MeetingDetailView: View {
                 // Don't fight the user's drag — the slider owns playbackTime
                 // until the scrub commits.
                 if isScrubbing { return }
-                // AVAudioPlayer goes silent at end-of-track without a callback
-                // here — detect it, or the timer runs forever and the button
-                // stays stuck on pause.
-                if audioPlayer?.isPlaying != true && micPlayer?.isPlaying != true {
+                if hasAudioTracks {
+                    // AVAudioPlayer goes silent at end-of-track without a callback
+                    // here — detect it, or the timer runs forever and the button
+                    // stays stuck on pause.
+                    if audioPlayer?.isPlaying != true && micPlayer?.isPlaying != true {
+                        stopPlayback()
+                        playbackTime = 0
+                        followPlayhead()
+                        return
+                    }
+                    playbackTime = audioPlayer?.currentTime ?? micPlayer?.currentTime ?? 0
+                    if showInlineVideo, let player = inlineVideoPlayer, isPlaying {
+                        let expected = videoTime(for: playbackTime).seconds
+                        let actual = player.currentTime().seconds
+                        if actual.isFinite, abs(actual - expected) > 0.35 {
+                            player.seek(to: videoTime(for: playbackTime), toleranceBefore: CMTime(seconds: 0.05, preferredTimescale: 600), toleranceAfter: CMTime(seconds: 0.05, preferredTimescale: 600))
+                        }
+                    }
+                } else if let player = inlineVideoPlayer {
+                    let currentSeconds = player.currentTime().seconds
+                    let itemDuration = player.currentItem?.duration.seconds ?? effectiveDuration
+                    if player.rate == 0 || !currentSeconds.isFinite || (itemDuration.isFinite && itemDuration > 0 && currentSeconds >= itemDuration) {
+                        stopPlayback()
+                        playbackTime = 0
+                        followPlayhead()
+                        return
+                    }
+                    playbackTime = audioTime(for: player.currentTime())
+                } else {
                     stopPlayback()
-                    playbackTime = 0
-                    followPlayhead()
                     return
                 }
-                playbackTime = audioPlayer?.currentTime ?? micPlayer?.currentTime ?? 0
                 followPlayhead()
             }
         }
@@ -1634,6 +1808,7 @@ struct MeetingDetailView: View {
     private func stopPlayback() {
         audioPlayer?.stop()
         micPlayer?.stop()
+        inlineVideoPlayer?.pause()
         playbackTimer?.invalidate()
         isPlaying = false
         playingMoment = nil
@@ -1644,12 +1819,21 @@ struct MeetingDetailView: View {
         let wasPlaying = isPlaying
         audioPlayer?.pause()
         micPlayer?.pause()
+        inlineVideoPlayer?.pause()
         audioPlayer?.currentTime = min(time, audioPlayer?.duration ?? time)
         micPlayer?.currentTime = min(time, micPlayer?.duration ?? time)
         // Clamp the UI too: an insight callTime past the audio's end must not
         // draw a >100% progress bar.
-        let duration = max(audioPlayer?.duration ?? 0, micPlayer?.duration ?? 0)
+        let duration = max(audioPlayer?.duration ?? 0, micPlayer?.duration ?? 0, effectiveDuration)
         playbackTime = duration > 0 ? min(time, duration) : time
+
+        if showInlineVideo && inlineVideoPlayer == nil {
+            setupInlineVideoPlayer()
+        } else if let player = inlineVideoPlayer {
+            let target = videoTime(for: playbackTime)
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+
         followPlayhead()
         if wasPlaying { startSynced() }
     }

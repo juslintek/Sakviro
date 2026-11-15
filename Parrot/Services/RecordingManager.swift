@@ -64,6 +64,7 @@ final class RecordingManager {
     private var aboutTried: Set<UUID> = []
 
     var audioCleaningMeetingIDs: Set<UUID> = []
+    var batchAudioCleanProgress: (completed: Int, total: Int)? = nil
     var activeVideoTargetSummary: String? = nil
 
     var transcriptionJobs: [UUID: TranscriptionJobProgress] = [:]
@@ -417,7 +418,9 @@ final class RecordingManager {
             }
         }
         do {
-            try await preflightPermissionsAndStart(modelContext: modelContext, profileOverride: override)
+            try await preflightPermissionsAndStart(modelContext: modelContext,
+                                                   profileOverride: override,
+                                                   detectedCallAppID: appID)
         } catch {
             NSLog("Parrot: detected-call recording failed to start, \(error.localizedDescription)")
         }
@@ -430,7 +433,9 @@ final class RecordingManager {
     /// permissions, then starts. Returns without starting (and without throwing)
     /// when a permission flow was triggered instead.
     func preflightPermissionsAndStart(modelContext: ModelContext,
-                                      profileOverride: CallProfile? = nil, useScreen: Bool = false) async throws {
+                                      profileOverride: CallProfile? = nil,
+                                      useScreen: Bool = false,
+                                      detectedCallAppID: String? = nil) async throws {
         if useScreen { try requireScreenAnalysis(profile: profileOverride ?? profileStore.activeProfile) }
         // Check the system-audio permission BEFORE touching any capture API.
         // macOS 15+: the audio-only tap permission (optimistic after the one
@@ -454,14 +459,20 @@ final class RecordingManager {
         // Non-fatal: system audio still records if denied.
         _ = await PermissionFlow.requestMicrophone()
 
-        try await startRecording(modelContext: modelContext, profileOverride: profileOverride, useScreen: useScreen)
+        try await startRecording(modelContext: modelContext,
+                                 profileOverride: profileOverride,
+                                 useScreen: useScreen,
+                                 detectedCallAppID: detectedCallAppID)
     }
 
     /// `profileOverride` records this one call under another profile (a
     /// detected call whose calendar title names one) without changing the
     /// user's active choice.
-    func startRecording(modelContext: ModelContext, profileOverride: CallProfile? = nil,
-                        mode: SessionMode = .meeting, useScreen: Bool = false) async throws {
+    func startRecording(modelContext: ModelContext,
+                        profileOverride: CallProfile? = nil,
+                        mode: SessionMode = .meeting,
+                        useScreen: Bool = false,
+                        detectedCallAppID: String? = nil) async throws {
         self.modelContext = modelContext
         // Reject re-entry up front (before any await) so a double-trigger can't
         // start two recordings / two transcription loops. Also blocked while a
@@ -484,7 +495,18 @@ final class RecordingManager {
         }
 
         var videoFilter: SCContentFilter?
-        if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
+        if let detectedCallAppID {
+            if UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
+                let capture = VideoCaptureService()
+                if let filter = await capture.selectTargetForDetectedCall(appID: detectedCallAppID, mode: .current) {
+                    videoFilter = filter
+                    videoCapture = capture
+                } else {
+                    videoFilter = nil
+                    videoCapture = nil
+                }
+            }
+        } else if mode == .screenOnly || useScreen || UserDefaults.standard.bool(forKey: VideoCaptureService.enabledKey) {
             let capture = VideoCaptureService()
             if let filter = try await capture.chooseSource(mode: .current) {
                 videoFilter = filter
@@ -1311,6 +1333,27 @@ final class RecordingManager {
         } catch {
             NSLog("Parrot: audio cleaning failed for meeting \(meeting.id): \(error.localizedDescription)")
         }
+    }
+
+    @MainActor
+    func cleanAllMeetingsAudio(forceReclean: Bool = false) async -> Int {
+        guard batchAudioCleanProgress == nil, let modelContext else { return 0 }
+        guard let all = try? modelContext.fetch(FetchDescriptor<Meeting>()) else { return 0 }
+        let targets = all.filter { m in
+            m.status != .recording &&
+            (m.systemAudioPath.nilIfEmpty != nil || m.micAudioPath?.nilIfEmpty != nil) &&
+            (forceReclean || !m.hasCleanedAudio)
+        }
+        guard !targets.isEmpty else { return 0 }
+
+        batchAudioCleanProgress = (0, targets.count)
+        defer { batchAudioCleanProgress = nil }
+
+        for (idx, meeting) in targets.enumerated() {
+            await cleanMeetingAudio(meeting, remuxVideoIfPresent: true)
+            batchAudioCleanProgress = (idx + 1, targets.count)
+        }
+        return targets.count
     }
 
     // MARK: - Deletion

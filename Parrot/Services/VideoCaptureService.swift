@@ -4,6 +4,7 @@ import ScreenCaptureKit
 import CoreImage
 import CryptoKit
 import VideoToolbox
+import Vision
 
 enum VideoArchivePreset: String, CaseIterable, Identifiable {
     case compact720p10
@@ -90,6 +91,15 @@ enum VideoCaptureTargetMode: String, CaseIterable, Identifiable, Sendable {
         case .display: [.singleDisplay]
         }
     }
+
+    var preferredPickerStyle: SCShareableContentStyle {
+        switch self {
+        case .window: .window
+        case .application: .application
+        case .display: .display
+        case .any: .window
+        }
+    }
 }
 
 struct ScreenSourceActivity {
@@ -170,36 +180,44 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
     }
 
     @MainActor
-    func chooseSource(windowOnly: Bool = false) async throws -> SCContentFilter? {
-        try await chooseSource(mode: .current)
+    func applySelectedTarget(summary: String, updateStreamWith filter: SCContentFilter? = nil) async {
+        self.targetSummary = summary
+        self.onTargetChanged?(summary)
+        if let filter, let stream = self.stream {
+            try? await stream.updateContentFilter(filter)
+        }
     }
 
     @MainActor
-    func chooseSource(mode: VideoCaptureTargetMode) async throws -> SCContentFilter? {
+    func presentSystemTargetPicker(mode: VideoCaptureTargetMode = .current) {
         let picker = SCContentSharingPicker.shared
+        picker.isActive = true
+        if let stream = self.stream {
+            picker.present(for: stream, using: mode.preferredPickerStyle)
+        } else {
+            picker.present(using: mode.preferredPickerStyle)
+        }
+    }
+
+    private func makePickerConfiguration(mode: VideoCaptureTargetMode = .current) -> SCContentSharingPickerConfiguration {
         var configuration = SCContentSharingPickerConfiguration()
         configuration.allowedPickerModes = mode.pickerModes
         configuration.allowsChangingSelectedContent = true
         if let bundleID = Bundle.main.bundleIdentifier {
             configuration.excludedBundleIDs = [bundleID]
         }
-        picker.defaultConfiguration = configuration
+        return configuration
+    }
+
+    @MainActor
+    func chooseWithSystemPicker(mode: VideoCaptureTargetMode) async throws -> SCContentFilter? {
+        let picker = SCContentSharingPicker.shared
+        picker.defaultConfiguration = makePickerConfiguration(mode: mode)
         picker.add(self)
         picker.isActive = true
         return try await withCheckedThrowingContinuation { continuation in
             selection = continuation
-            picker.present()
-        }
-    }
-
-    @MainActor
-    func presentChangeTargetPicker() {
-        let picker = SCContentSharingPicker.shared
-        picker.isActive = true
-        if let stream {
-            picker.present(for: stream)
-        } else {
-            picker.present()
+            picker.present(using: mode.preferredPickerStyle)
         }
     }
 
@@ -252,9 +270,10 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
 
     func start(filter: SCContentFilter, audioOrigin: TimeInterval, archive: Bool = true) async throws {
         lastActivityReportedAt = .distantPast
-        let summary = Self.describeFilter(filter)
-        targetSummary = summary
-        onTargetChanged?(summary)
+        if targetSummary.isEmpty || targetSummary == "Selected screen" {
+            targetSummary = Self.describeFilter(filter)
+        }
+        onTargetChanged?(targetSummary)
         queue.sync {
             streamStopped = false
             acceptingFrames = true
@@ -277,6 +296,9 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         config.width = width
         config.height = height
         config.scalesToFit = true
+        if #available(macOS 14.0, *) {
+            config.preservesAspectRatio = true
+        }
         config.colorSpaceName = CGColorSpace.sRGB
         config.showsCursor = Self.showsCursor
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(archive ? preset.fps : 2))
@@ -285,6 +307,7 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         config.capturesAudio = false
         if !archive {
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            SCContentSharingPicker.shared.setConfiguration(makePickerConfiguration(), for: stream)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             self.stream = stream
             self.audioOrigin = audioOrigin
@@ -330,6 +353,7 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
         writer.add(input)
         guard writer.startWriting() else { throw writer.error ?? VideoError.writer }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        SCContentSharingPicker.shared.setConfiguration(makePickerConfiguration(), for: stream)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.writer = writer
         self.input = input
@@ -775,6 +799,10 @@ final class VideoCaptureService: NSObject, SCContentSharingPickerObserver, SCStr
             }
         }
     }
+
+    static func recognizeScreenText(in image: CGImage, maxCharacters: Int = 3200) -> String {
+        ScreenFrameSampler.recognizeScreenText(in: image, maxCharacters: maxCharacters)
+    }
 }
 
 final class ScreenFrameSampler {
@@ -927,6 +955,35 @@ final class ScreenFrameSampler {
         queue.asyncAfter(deadline: .now() + max(0, interval - (Date.now.timeIntervalSince1970 - lastSample)), execute: task)
     }
 
+    static func recognizeScreenText(in image: CGImage, maxCharacters: Int = 3200) -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .fast
+        request.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+            guard let observations = request.results else { return "" }
+            let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+            let joined = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if joined.count > maxCharacters {
+                return String(joined.prefix(maxCharacters))
+            }
+            return joined
+        } catch {
+            return ""
+        }
+    }
+
+    private func makeCGImage(_ buffer: CVPixelBuffer) -> CGImage? {
+        var image = CIImage(cvPixelBuffer: buffer)
+        let extent = image.extent
+        let scale = min(1.0, 1280.0 / max(extent.width, extent.height))
+        if scale < 1.0 {
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        return context.createCGImage(image, from: image.extent)
+    }
+
     private func encodeJPEG(_ buffer: CVPixelBuffer) -> Data? {
         var image = CIImage(cvPixelBuffer: buffer)
         let extent = image.extent
@@ -975,7 +1032,13 @@ final class ScreenFrameSampler {
         lock.unlock()
 
         guard active else { return }
-        let screen = validJPEG.map { ScreenContext(jpeg: $0, text: "", capturedAt: capturedAt, sourceLabel: label, observedAt: observation) }
+
+        var ocrText = ""
+        if changed, let cgImage = makeCGImage(buffer) {
+            ocrText = Self.recognizeScreenText(in: cgImage)
+        }
+
+        let screen = validJPEG.map { ScreenContext(jpeg: $0, text: ocrText, capturedAt: capturedAt, sourceLabel: label, observedAt: observation) }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.lock.lock()

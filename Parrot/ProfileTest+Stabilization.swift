@@ -391,6 +391,148 @@ extension ProfileTest {
         check("video remux: executed without error", !remuxThrew)
         check("video remux: output file exists and is non-empty", FileManager.default.fileExists(atPath: muxedMP4.path) && fileSize > 0)
         check("video remux: loads both video and audio tracks", loadedVTracks >= 1 && loadedATracks >= 1)
+
+        // 5. Cross-Track Speaker Bleed Suppression
+        let bleedSR = 16000.0
+        let bleedTotalSamples = Int(3.5 * bleedSR)
+        var bleedSys = [Float](repeating: 0, count: bleedTotalSamples)
+        for i in 0..<bleedTotalSamples {
+            let t = Double(i) / bleedSR
+            if (t >= 0.20 && t < 1.00) || (t >= 1.30 && t < 2.10) {
+                bleedSys[i] = Float(0.26 * (0.6 * sin(2.0 * .pi * 420.0 * t) + 0.4 * sin(2.0 * .pi * 840.0 * t)))
+            }
+        }
+
+        let delaySamples = 640
+        var bleedMic = [Float](repeating: 0, count: bleedTotalSamples)
+        for i in 0..<bleedTotalSamples {
+            let t = Double(i) / bleedSR
+            var m: Float = 0
+            if i >= delaySamples {
+                m += 0.18 * bleedSys[i - delaySamples]
+            }
+            if t >= 2.40 && t < 3.10 {
+                m += Float(0.38 * sin(2.0 * .pi * 310.0 * t))
+            }
+            bleedMic[i] = m
+        }
+
+        let (cleanedBleedMic, attenuatedSec) = AudioQualityCleaner.suppressSpeakerBleed(mic: bleedMic, system: bleedSys, sampleRate: bleedSR)
+
+        func bufferRMS(_ buf: [Float], startSec: Double, endSec: Double, sr: Double = 16000.0) -> Double {
+            let sIdx = max(0, Int(startSec * sr))
+            let eIdx = min(buf.count, Int(endSec * sr))
+            guard eIdx > sIdx else { return 0.0 }
+            var sumSq: Double = 0
+            for k in sIdx..<eIdx {
+                let v = Double(buf[k])
+                sumSq += v * v
+            }
+            return sqrt(sumSq / Double(eIdx - sIdx))
+        }
+
+        let rawBleedOnlyRMS = bufferRMS(bleedMic, startSec: 0.30, endSec: 0.95, sr: bleedSR)
+        let cleanedBleedOnlyRMS = bufferRMS(cleanedBleedMic, startSec: 0.30, endSec: 0.95, sr: bleedSR)
+        let rawMeRMS = bufferRMS(bleedMic, startSec: 2.50, endSec: 3.05, sr: bleedSR)
+        let cleanedMeRMS = bufferRMS(cleanedBleedMic, startSec: 2.50, endSec: 3.05, sr: bleedSR)
+
+        check("speaker bleed: cleaned sample count preserved", cleanedBleedMic.count == bleedMic.count)
+        check("speaker bleed: attenuated seconds >= 0.5s", attenuatedSec >= 0.5)
+        check("speaker bleed: bleed suppressed > 9 dB", cleanedBleedOnlyRMS < 0.35 * rawBleedOnlyRMS)
+        check("speaker bleed: near-end me burst preserved", cleanedMeRMS >= 0.85 * rawMeRMS)
+
+        // Clean headphone mic
+        var headphoneMic = [Float](repeating: 0, count: bleedTotalSamples)
+        for i in 0..<bleedTotalSamples {
+            let t = Double(i) / bleedSR
+            var h: Float = 0
+            if t < 2.20 {
+                h = Float(0.0008 * sin(2.0 * .pi * 1234.0 * t))
+            }
+            if t >= 2.40 && t < 3.10 {
+                h += Float(0.38 * sin(2.0 * .pi * 310.0 * t))
+            }
+            headphoneMic[i] = h
+        }
+        let (hpCleaned, hpBleedSec) = AudioQualityCleaner.suppressSpeakerBleed(mic: headphoneMic, system: bleedSys, sampleRate: bleedSR)
+        check("speaker bleed: clean headphone mic has zero attenuation", hpBleedSec == 0 && hpCleaned == headphoneMic)
+
+        // 6. Harsh Sibilance Tamer
+        let sibSR = 16000.0
+        let sibTotalSamples = Int(2.0 * sibSR)
+        var sibSamples = [Float](repeating: 0, count: sibTotalSamples)
+        for i in 0..<sibTotalSamples {
+            let t = Double(i) / sibSR
+            var v: Float = Float(0.0002 * sin(2.0 * .pi * 900.0 * t))
+            if t >= 0.35 && t < 1.65 {
+                v += Float(0.12 * sin(2.0 * .pi * 420.0 * t))
+            }
+            if t >= 0.55 && t < 1.05 {
+                v += Float(0.22 * sin(2.0 * .pi * 5600.0 * t))
+            }
+            sibSamples[i] = v
+        }
+
+        let (sibCleaned, _, sibFindings) = AudioQualityCleaner.processBuffer(sibSamples, sampleRate: sibSR, trackLabel: "Mic")
+        check("harsh sibilance: sample count preserved", sibCleaned.count == sibSamples.count)
+        check("harsh sibilance: finding reported and fixed", sibFindings.contains { $0.kind == .harshSibilance && $0.fixed })
+
+        var rawHigh = sibSamples
+        var rawMid = sibSamples
+        var cleanHigh = sibCleaned
+        var cleanMid = sibCleaned
+
+        var hpfRaw = AudioQualityCleaner.BiquadHPF(cutoff: 4800.0, sampleRate: sibSR)
+        var hpfClean = AudioQualityCleaner.BiquadHPF(cutoff: 4800.0, sampleRate: sibSR)
+        hpfRaw.processInPlace(&rawHigh)
+        hpfClean.processInPlace(&cleanHigh)
+
+        var midHPFRaw = AudioQualityCleaner.BiquadHPF(cutoff: 300.0, sampleRate: sibSR)
+        var midLPFRaw = AudioQualityCleaner.BiquadLPF(cutoff: 3500.0, sampleRate: sibSR)
+        midHPFRaw.processInPlace(&rawMid)
+        midLPFRaw.processInPlace(&rawMid)
+
+        var midHPFClean = AudioQualityCleaner.BiquadHPF(cutoff: 300.0, sampleRate: sibSR)
+        var midLPFClean = AudioQualityCleaner.BiquadLPF(cutoff: 3500.0, sampleRate: sibSR)
+        midHPFClean.processInPlace(&cleanMid)
+        midLPFClean.processInPlace(&cleanMid)
+
+        let rawRatio = bufferRMS(rawHigh, startSec: 0.60, endSec: 1.00, sr: sibSR) / max(1e-6, bufferRMS(rawMid, startSec: 0.60, endSec: 1.00, sr: sibSR))
+        let cleanRatio = bufferRMS(cleanHigh, startSec: 0.60, endSec: 1.00, sr: sibSR) / max(1e-6, bufferRMS(cleanMid, startSec: 0.60, endSec: 1.00, sr: sibSR))
+        check("harsh sibilance: high-to-mid ratio strictly reduced", cleanRatio < rawRatio)
+
+        // 7. Vision Screen OCR
+        let ocrWidth = 640
+        let ocrHeight = 180
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        var recognizedText = ""
+        if let cgCtx = CGContext(data: nil, width: ocrWidth, height: ocrHeight, bitsPerComponent: 8, bytesPerRow: ocrWidth * 4, space: colorSpace, bitmapInfo: bitmapInfo.rawValue) {
+            let nsCtx = NSGraphicsContext(cgContext: cgCtx, flipped: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = nsCtx
+            cgCtx.setFillColor(NSColor.white.cgColor)
+            cgCtx.fill(CGRect(x: 0, y: 0, width: ocrWidth, height: ocrHeight))
+            let text = "SAKVIRO SPRINT 42"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.boldSystemFont(ofSize: 44),
+                .foregroundColor: NSColor.black
+            ]
+            let str = NSAttributedString(string: text, attributes: attrs)
+            str.draw(at: CGPoint(x: 30, y: 60))
+            NSGraphicsContext.restoreGraphicsState()
+            if let img = cgCtx.makeImage() {
+                recognizedText = ScreenFrameSampler.recognizeScreenText(in: img)
+            }
+        }
+        let upperOCR = recognizedText.uppercased()
+        check("vision screen ocr: recognizes SAKVIRO and 42", upperOCR.contains("SAKVIRO") && upperOCR.contains("42"))
+
+        // 8. Target Picker Styles & Summary Preservation
+        check("target picker styles: window application display mapping",
+              VideoCaptureTargetMode.window.preferredPickerStyle == .window &&
+              VideoCaptureTargetMode.application.preferredPickerStyle == .application &&
+              VideoCaptureTargetMode.display.preferredPickerStyle == .display)
     }
 
     private static func writeSyntheticVideo(url: URL, width: Int = 160, height: Int = 160, duration: Double = 1.0) throws {

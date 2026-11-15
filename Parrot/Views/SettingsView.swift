@@ -91,6 +91,7 @@ struct SettingsView: View {
     /// typing in a field shows one toast when the user pauses, not per key.
     @State private var showSavedToast = false
     @State private var savedToastTask: Task<Void, Never>?
+    @State private var batchCleanStatus: String? = nil
     /// Mirrors Sparkle's own setting so the toggle survives a relaunch without
     /// us storing a second copy of the truth.
     #if !PARROT_NO_UPDATER
@@ -325,6 +326,53 @@ struct SettingsView: View {
                     first: true,
                     isOn: $autoCleanAudio
                 )
+                if let prog = recordingManager.batchAudioCleanProgress {
+                    SettingsRow {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Cleaning \(prog.completed) / \(prog.total) meetings…")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Colors.ink2)
+                        }
+                    }
+                } else {
+                    SettingsLabeledRow(
+                        title: "Scan & Clean Existing Meetings",
+                        detail: "Process existing recorded meetings that have uncleaned audio tracks."
+                    ) {
+                        HStack(spacing: 8) {
+                            if let status = batchCleanStatus {
+                                Text(status)
+                                    .font(Theme.Typography.caption)
+                                    .foregroundStyle(Theme.Colors.ink2)
+                            }
+                            Menu {
+                                Button("Clean Uncleaned Meetings") {
+                                    Task {
+                                        let count = await recordingManager.cleanAllMeetingsAudio(forceReclean: false)
+                                        batchCleanStatus = count > 0 ? "Cleaned \(count) meeting\(count == 1 ? "" : "s")" : "All meetings already cleaned"
+                                    }
+                                }
+                                Button("Re-clean All Meetings") {
+                                    Task {
+                                        let count = await recordingManager.cleanAllMeetingsAudio(forceReclean: true)
+                                        batchCleanStatus = count > 0 ? "Re-cleaned \(count) meeting\(count == 1 ? "" : "s")" : "No meetings to clean"
+                                    }
+                                }
+                            } label: {
+                                Text("Clean Uncleaned Meetings")
+                            } primaryAction: {
+                                Task {
+                                    let count = await recordingManager.cleanAllMeetingsAudio(forceReclean: false)
+                                    batchCleanStatus = count > 0 ? "Cleaned \(count) meeting\(count == 1 ? "" : "s")" : "All meetings already cleaned"
+                                }
+                            }
+                            .menuStyle(.borderedButton)
+                            .fixedSize()
+                        }
+                    }
+                }
             }
 
             SettingsCard(title: "Input") {
