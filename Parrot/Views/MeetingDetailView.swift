@@ -78,7 +78,7 @@ struct MeetingDetailView: View {
     @State private var bookmarkLabelText = ""
     @State private var showTranscriptionLog = false
 
-    var body: some View {
+    private var meetingContent: some View {
         VStack(spacing: 0) {
             // First pick of the height, so the About wraps in full; the tab
             // below scrolls with whatever is left.
@@ -161,6 +161,10 @@ struct MeetingDetailView: View {
         }
         .background(Theme.Colors.canvas)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    var body: some View {
+        meetingContent
         .onAppear {
             titleText = meeting.title
             themNameText = meeting.themName ?? ""
