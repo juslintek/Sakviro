@@ -1718,6 +1718,8 @@ enum SidebarSnapshot {
             exit(1)
         }
         let context = container.mainContext
+        setenv("PARROT_KB_INDEX", FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path, 1)
+        let manager = RecordingManager(memory: MeetingMemory(directory: nil), chats: AskChatStore(directory: nil))
 
         // Alternating two-sided call — balanced strip.
         let balanced = seed(context, "Sales discovery — Acme", minutes: 45,
@@ -1741,6 +1743,7 @@ enum SidebarSnapshot {
         .padding(8)
         .frame(width: 240)
         .background(Theme.Colors.panel)
+        .environment(manager)
 
         let light = render(rows, dark: false, to: path)
         let dark = render(rows, dark: true, to: (path as NSString).deletingPathExtension + "-dark.png")
