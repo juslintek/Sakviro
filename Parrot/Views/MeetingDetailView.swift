@@ -163,7 +163,7 @@ struct MeetingDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    var body: some View {
+    private var meetingLifecycle: some View {
         meetingContent
         .onAppear {
             titleText = meeting.title
@@ -195,6 +195,10 @@ struct MeetingDetailView: View {
         .onChange(of: meeting.cleanedSystemAudioPath) { _, _ in
             reloadAudioPlayersPreservingPosition()
         }
+    }
+
+    private var meetingUpdates: some View {
+        meetingLifecycle
         // Lines land while a meeting processes, and naming a voice changes
         // the speaker the receipts quote — rebuild on either.
         .task(id: receiptIndexKey) {
@@ -230,6 +234,10 @@ struct MeetingDetailView: View {
                 Task { await memory.index(m) }
             }
         }
+    }
+
+    var body: some View {
+        meetingUpdates
         .toolbar {
             ToolbarItemGroup {
                 Button {
