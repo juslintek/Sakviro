@@ -80,6 +80,7 @@ enum MCPServer {
 
     @MainActor
     static func run() async {
+        FileHandle.standardError.write(Data("\(MeetingActions.appName): MCP starting (pid \(ProcessInfo.processInfo.processIdentifier)).\n".utf8))
         guard UserDefaults.standard.bool(forKey: enabledKey) else {
             FileHandle.standardError.write(Data("\(MeetingActions.appName): the AI-app connection is off. Turn it on in \(MeetingActions.appName) → Settings → Connections.\n".utf8))
             exit(1)
@@ -93,6 +94,7 @@ enum MCPServer {
             FileHandle.standardError.write(Data("\(MeetingActions.appName): couldn't open your meetings. If \(MeetingActions.appName) was just updated, open it once, then try again.\n".utf8))
             exit(1)
         }
+        FileHandle.standardError.write(Data("\(MeetingActions.appName): MCP ready (pid \(ProcessInfo.processInfo.processIdentifier)).\n".utf8))
         // One request at a time, in order. Awaiting here (not a semaphore on
         // main) matters: the snapshot and the search both need the main actor.
         do {
@@ -144,8 +146,10 @@ enum MCPServer {
                     client: clientName)
                 if let reply = await handle(message, source: source) { respond(reply) }
             }
+            FileHandle.standardError.write(Data("\(MeetingActions.appName): MCP stdin reached EOF.\n".utf8))
         } catch {
-            FileHandle.standardError.write(Data("\(MeetingActions.appName): lost the connection to the AI app.\n".utf8))
+            FileHandle.standardError.write(Data("\(MeetingActions.appName): MCP stdin read failed: \(error.localizedDescription)\n".utf8))
+            exit(1)
         }
         exit(0)
     }
