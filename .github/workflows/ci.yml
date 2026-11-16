@@ -69,12 +69,12 @@ jobs:
       - name: Logic harness (--profile-test)
         run: |
           set +e
-          .build/debug/Parrot --profile-test > harness.log 2>&1
+          script -q /dev/null .build/debug/Parrot --profile-test > harness.log 2>&1
           status=$?
           echo "--- failing checks ---"
           grep -E "^FAIL " harness.log || echo "(none)"
           echo "passed: $(grep -c '^PASS ' harness.log)  failed: $(grep -c '^FAIL ' harness.log)"
-          tail -1 harness.log
+          if [ "$status" -eq 0 ]; then tail -1 harness.log; else tail -40 harness.log; fi
           exit $status
 
       - name: Video mux and screen sampler
