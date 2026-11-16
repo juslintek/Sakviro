@@ -80,15 +80,32 @@ extension ProfileTest {
             check("delete: audio removed", !FileManager.default.fileExists(atPath: audio.path))
             try Data([4, 5, 6]).write(to: audio)
             survivor.systemAudioPath = audio.path
+            survivor.notes = "Keep these notes"
+            let retainedLine = TranscriptSegment(startTime: 0, endTime: 1, text: "Keep this line")
+            reopened.insert(retainedLine)
+            retainedLine.meeting = survivor
+            let retainedInsight = CallInsight(from: Insight(kindKey: "suggestion", title: "Keep this insight", detail: "", callTime: 0, source: nil))
+            reopened.insert(retainedInsight)
+            retainedInsight.meeting = survivor
             try reopened.save()
             let readOnly = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, url: configuration.url, allowsSave: false)])
             let readOnlyContext = ModelContext(readOnly)
             let protected = try readOnlyContext.fetch(FetchDescriptor<Meeting>()).first!
             manager.attachForHarness(modelContext: readOnlyContext)
+            protected.notes = "Unsaved edit"
+            check("delete: failed pre-save preserves pending edit", !manager.delete(protected) && protected.notes == "Unsaved edit" && readOnlyContext.hasChanges)
+            readOnlyContext.rollback()
             check("delete: failed save is reported", !manager.delete(protected) && manager.deletionFailure != nil)
             let restoredMeetings = try readOnlyContext.fetch(FetchDescriptor<Meeting>())
             let persistedCount = try ModelContext(readOnly).fetchCount(FetchDescriptor<Meeting>())
             check("delete: failed save restores library query", restoredMeetings.count == 1)
+            if let restored = restoredMeetings.first, !restored.isDeleted {
+                check("delete: failed save preserves original meeting", restored === protected && restored.notes == "Keep these notes" && restored.profile?.id == survivor.profile?.id)
+                check("delete: failed save preserves children", restored.segments.count == 1 && restored.segments.first?.text == "Keep this line" && restored.insights.count == 1 && restored.insights.first?.title == "Keep this insight")
+            } else {
+                check("delete: failed save preserves original meeting", false)
+                check("delete: failed save preserves children", false)
+            }
             check("delete: failed save retains persisted meeting", persistedCount == 1)
             check("delete: failed save retains recording", FileManager.default.fileExists(atPath: audio.path))
             guard let activeContext = phase4Context() else {

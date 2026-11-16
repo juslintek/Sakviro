@@ -29,6 +29,8 @@ extension ProfileTest {
             let readOnly = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, url: config.url, allowsSave: false)])
             let failedContext = ModelContext(readOnly)
             failedContext.autosaveEnabled = false
+            let openMeeting = try failedContext.fetch(FetchDescriptor<Meeting>()).first!
+            let openSegment = openMeeting.segments.first!
             var failed = false
             do {
                 _ = try RecordingManager.saveRetranscription(meetingID: id, context: failedContext, segments: replacement, embeddingsData: Data([9]))
@@ -36,6 +38,17 @@ extension ProfileTest {
             check("integrity: read-only store rejects replacement", failed)
             let sameContext = try failedContext.fetch(FetchDescriptor<Meeting>()).first!
             check("integrity: failed save restores open meeting", sameContext.segments.map(\.text) == ["Original"] && sameContext.speakerNames == ["Them": "Alex"] && sameContext.speakerEmbeddingsData == Data([1, 2, 3]))
+            check("integrity: original open segment remains readable", openMeeting.segments.first === openSegment && openSegment.text == "Original" && openSegment.startTime == 0 && openSegment.endTime == 1 && openSegment.speakerLabel == "Them" && openSegment.confidence == nil)
+            for candidate in [[], replacement + replacement] {
+                let candidateContext = ModelContext(readOnly)
+                candidateContext.autosaveEnabled = false
+                let candidateMeeting = try candidateContext.fetch(FetchDescriptor<Meeting>()).first!
+                var rejected = false
+                do {
+                    _ = try RecordingManager.saveRetranscription(meetingID: id, context: candidateContext, segments: candidate, embeddingsData: Data([9]))
+                } catch { rejected = true }
+                check("integrity: failed replacement count \(candidate.count) restores open meeting", rejected && candidateMeeting.segments.map(\.text) == ["Original"] && candidateMeeting.speakerNames == ["Them": "Alex"] && candidateMeeting.speakerEmbeddingsData == Data([1, 2, 3]))
+            }
             sameContext.title = "Pending title"
             do {
                 _ = try RecordingManager.saveRetranscription(meetingID: id, context: failedContext, segments: replacement, embeddingsData: Data([9]))
@@ -92,6 +105,8 @@ extension ProfileTest {
             check("integrity: pending unrelated edit preserved", savedUnrelated)
             let saved = try ModelContext(container).fetch(FetchDescriptor<Meeting>()).first { $0.id == id }!
             check("integrity: replacement persisted", saved.segments.map(\.text) == ["Replacement"] && saved.speakerEmbeddingsData == Data([9]))
+            let segmentCount = try ModelContext(container).fetchCount(FetchDescriptor<TranscriptSegment>())
+            check("integrity: old transcript rows removed", segmentCount == replacement.count)
             RunLoop.main.run(until: .now + 0.1)
             check("integrity: open meeting refreshes replacement", meeting.segments.map(\.text) == ["Replacement"] && meeting.speakerEmbeddingsData == Data([9]))
         } catch {

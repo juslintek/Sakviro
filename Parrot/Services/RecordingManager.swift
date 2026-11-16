@@ -1427,6 +1427,7 @@ final class RecordingManager {
             try context.save()
         } catch {
             context.rollback()
+            context.processPendingChanges()
             deletionFailure = "Couldn't delete the meeting. \(error.localizedDescription)"
             NSLog("Parrot: deletion failed, \(error.localizedDescription)")
             return false
@@ -2165,10 +2166,9 @@ final class RecordingManager {
         guard let meeting = try context.fetch(FetchDescriptor<Meeting>(predicate: #Predicate { $0.id == meetingID })).first else {
             throw CocoaError(.fileNoSuchFile)
         }
+        let oldSegments = meeting.segments
         do {
-            let oldSegments = meeting.segments
             meeting.segments.removeAll()
-            for old in oldSegments { context.delete(old) }
             for line in segments {
                 let segment = TranscriptSegment(startTime: line.start, endTime: line.end, text: line.text, speakerLabel: line.speaker, confidence: nil)
                 context.insert(segment)
@@ -2180,11 +2180,19 @@ final class RecordingManager {
             meeting.mergeSameNamedSpeakers()
             try Task.checkCancellation()
             try context.save()
-            return meeting
         } catch {
             context.rollback()
+            meeting.segments = oldSegments
             throw error
         }
+        for old in oldSegments { context.delete(old) }
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            NSLog("Parrot: old transcript cleanup failed, \(error.localizedDescription)")
+        }
+        return meeting
     }
 
     @discardableResult
