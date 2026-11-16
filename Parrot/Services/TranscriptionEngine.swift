@@ -2064,23 +2064,22 @@ final class TranscriptionEngine {
                 ))
             }
 
-            let structured: [String: Any] = [
-                "request": [
-                    "model": "parakeet-v3",
-                    "displayModel": modelLabel,
-                    "language": hint ?? "auto",
-                    "track": trackLabel,
-                    "intervalSec": [((start * 1000).rounded() / 1000), ((end * 1000).rounded() / 1000)],
-                    "durationSec": (((end - start) * 1000).rounded() / 1000),
-                    "samples": piece.audio.count
-                ],
-                "response": [
-                    "elapsedMs": elapsedMs,
-                    "realtimeFactor": ((rtf * 10).rounded() / 10),
-                    "rawText": rawResult,
-                    "accepted": !text.isEmpty
-                ]
+            let request: [String: Any] = [
+                "model": "parakeet-v3",
+                "displayModel": modelLabel,
+                "language": hint ?? "auto",
+                "track": trackLabel,
+                "intervalSec": [((start * 1000).rounded() / 1000), ((end * 1000).rounded() / 1000)],
+                "durationSec": (((end - start) * 1000).rounded() / 1000),
+                "samples": piece.audio.count
             ]
+            let response: [String: Any] = [
+                "elapsedMs": elapsedMs,
+                "realtimeFactor": ((rtf * 10).rounded() / 10),
+                "rawText": rawResult,
+                "accepted": !text.isEmpty
+            ]
+            let structured: [String: Any] = ["request": request, "response": response]
             let jsonStr = (try? JSONSerialization.data(withJSONObject: structured, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) }
 
             onTrace?(TranscriptionLogEntry(
