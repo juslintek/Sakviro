@@ -89,16 +89,22 @@ extension ProfileTest {
             retainedInsight.meeting = survivor
             try reopened.save()
             let readOnly = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, url: configuration.url, allowsSave: false)])
-            let readOnlyContext = ModelContext(readOnly)
-            let protected = try readOnlyContext.fetch(FetchDescriptor<Meeting>()).first!
-            manager.attachForHarness(modelContext: readOnlyContext)
             var deletionNotifications = 0
             let observer = NotificationCenter.default.addObserver(forName: .parrotMeetingWillDelete, object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated { deletionNotifications += 1 }
             }
-            protected.notes = "Unsaved edit"
-            check("delete: failed pre-save preserves pending edit", !manager.delete(protected) && protected.notes == "Unsaved edit" && readOnlyContext.hasChanges)
-            readOnlyContext.rollback()
+            do {
+                let pendingContext = ModelContext(readOnly)
+                let pending = try pendingContext.fetch(FetchDescriptor<Meeting>()).first!
+                manager.attachForHarness(modelContext: pendingContext)
+                pending.notes = "Unsaved edit"
+                check("delete: failed pre-save preserves pending edit", !manager.delete(pending) && pending.notes == "Unsaved edit" && pendingContext.hasChanges)
+            }
+            let readOnlyContext = ModelContext(readOnly)
+            let protected = try readOnlyContext.fetch(FetchDescriptor<Meeting>()).first!
+            manager.attachForHarness(modelContext: readOnlyContext)
+            check("delete: read-only fixture has original notes", protected.notes == "Keep these notes")
+            check("delete: read-only fixture has original profile", protected.profile?.id == survivor.profile?.id)
             check("delete: failed save is reported", !manager.delete(protected) && manager.deletionFailure != nil)
             NotificationCenter.default.removeObserver(observer)
             check("delete: read-only refusal keeps selection", deletionNotifications == 0)
@@ -107,6 +113,9 @@ extension ProfileTest {
             check("delete: failed save restores library query", restoredMeetings.count == 1)
             if let restored = restoredMeetings.first, !restored.isDeleted {
                 check("delete: failed save preserves original meeting", restored === protected && restored.notes == "Keep these notes" && restored.profile?.id == survivor.profile?.id)
+                check("delete: failed save preserves meeting identity", restored === protected)
+                check("delete: failed save preserves notes", restored.notes == "Keep these notes")
+                check("delete: failed save preserves profile", restored.profile?.id == survivor.profile?.id)
                 check("delete: failed save preserves children", restored.segments.count == 1 && restored.segments.first?.text == "Keep this line" && restored.insights.count == 1 && restored.insights.first?.title == "Keep this insight")
             } else {
                 check("delete: failed save preserves original meeting", false)
