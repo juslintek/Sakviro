@@ -92,10 +92,16 @@ extension ProfileTest {
             let readOnlyContext = ModelContext(readOnly)
             let protected = try readOnlyContext.fetch(FetchDescriptor<Meeting>()).first!
             manager.attachForHarness(modelContext: readOnlyContext)
+            var deletionNotifications = 0
+            let observer = NotificationCenter.default.addObserver(forName: .parrotMeetingWillDelete, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { deletionNotifications += 1 }
+            }
             protected.notes = "Unsaved edit"
             check("delete: failed pre-save preserves pending edit", !manager.delete(protected) && protected.notes == "Unsaved edit" && readOnlyContext.hasChanges)
             readOnlyContext.rollback()
             check("delete: failed save is reported", !manager.delete(protected) && manager.deletionFailure != nil)
+            NotificationCenter.default.removeObserver(observer)
+            check("delete: read-only refusal keeps selection", deletionNotifications == 0)
             let restoredMeetings = try readOnlyContext.fetch(FetchDescriptor<Meeting>())
             let persistedCount = try ModelContext(readOnly).fetchCount(FetchDescriptor<Meeting>())
             check("delete: failed save restores library query", restoredMeetings.count == 1)

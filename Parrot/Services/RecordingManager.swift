@@ -1416,6 +1416,10 @@ final class RecordingManager {
             NSLog("Parrot: deletion save failed, \(error.localizedDescription)")
             return false
         }
+        guard context.container.configurations.allSatisfy(\.allowsSave) else {
+            deletionFailure = "Couldn't delete the meeting because the library is read-only."
+            return false
+        }
         // Retention deletes without the UI asking: let it drop the selection
         // first, or the detail view would read a deleted model and crash.
         NotificationCenter.default.post(name: .parrotMeetingWillDelete, object: id)
@@ -1427,7 +1431,6 @@ final class RecordingManager {
             try context.save()
         } catch {
             context.rollback()
-            context.processPendingChanges()
             deletionFailure = "Couldn't delete the meeting. \(error.localizedDescription)"
             NSLog("Parrot: deletion failed, \(error.localizedDescription)")
             return false
@@ -2167,6 +2170,8 @@ final class RecordingManager {
             throw CocoaError(.fileNoSuchFile)
         }
         let oldSegments = meeting.segments
+        let oldSpeakerNamesData = meeting.speakerNamesData
+        let oldEmbeddingsData = meeting.speakerEmbeddingsData
         do {
             meeting.segments.removeAll()
             for line in segments {
@@ -2183,6 +2188,8 @@ final class RecordingManager {
         } catch {
             context.rollback()
             meeting.segments = oldSegments
+            meeting.speakerNamesData = oldSpeakerNamesData
+            meeting.speakerEmbeddingsData = oldEmbeddingsData
             throw error
         }
         for old in oldSegments { context.delete(old) }
